@@ -21,8 +21,15 @@ data/
 
 # Testing
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
 htmlcov/
+*.log
 
 # Editor
 .vscode/
+
+# Google OAuth credentials and tokens
+secrets/
+token.json
