@@ -33,3 +33,7 @@ htmlcov/
 # Google OAuth credentials and tokens
 secrets/
 token.json
+# Private labeled email data and generated evaluation reports
+data/email_labels.csv
+reports/*.json
+!reports/.gitkeep

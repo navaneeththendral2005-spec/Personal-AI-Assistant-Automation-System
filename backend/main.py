@@ -1,11 +1,16 @@
 from contextlib import asynccontextmanager
+from time import perf_counter
+from uuid import uuid4
+from pathlib import Path
 import logging
 from collections.abc import Generator
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from backend.database import SessionLocal, engine
 from backend.models import Task
@@ -20,6 +25,10 @@ from backend.services.task_service import (
 )
 from backend.services.reminder_service import start_reminder_scheduler, stop_reminder_scheduler
 from backend.routers.gmail import router as gmail_router
+from backend.routers.gmail_sync_router import router as gmail_sync_router
+from backend.routers.gmail_intelligence import router as gmail_intelligence_router
+from backend.routers.friday_assistant import router as friday_assistant_router
+from backend.routers.career import router as career_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("friday")
@@ -43,6 +52,41 @@ app = FastAPI(
 )
 
 app.include_router(gmail_router)
+app.include_router(gmail_sync_router)
+app.include_router(gmail_intelligence_router)
+app.include_router(friday_assistant_router)
+app.include_router(career_router)
+
+# Lightweight production hygiene: request IDs, duration logging, and browser security headers.
+# This does not replace authentication; keep the API bound to localhost unless protected.
+@app.middleware("http")
+async def request_hardening(request: Request, call_next):
+    request_id = request.headers.get("x-request-id", str(uuid4()))[:100]
+    started = perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("Unhandled request error | request_id=%s | path=%s", request_id, request.url.path)
+        raise
+    elapsed_ms = round((perf_counter() - started) * 1000, 2)
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    logger.info("request_id=%s method=%s path=%s status=%s duration_ms=%s",
+                request_id, request.method, request.url.path, response.status_code, elapsed_ms)
+    return response
+
+
+DASHBOARD_DIR = Path(__file__).resolve().parent / "dashboard"
+app.mount("/dashboard-assets", StaticFiles(directory=str(DASHBOARD_DIR)), name="dashboard-assets")
+
+
+@app.get("/dashboard", include_in_schema=False)
+def dashboard():
+    """Serve the local FRIDAY dashboard."""
+    return FileResponse(DASHBOARD_DIR / "index.html", media_type="text/html")
 
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()

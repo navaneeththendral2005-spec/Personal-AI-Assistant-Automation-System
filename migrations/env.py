@@ -7,6 +7,8 @@ from sqlalchemy import engine_from_config, pool
 
 from backend.database import Base
 from backend import models
+from backend import models_email_intelligence
+from backend import models_career
 
 # Load environment variables from the project root .env file
 load_dotenv()
