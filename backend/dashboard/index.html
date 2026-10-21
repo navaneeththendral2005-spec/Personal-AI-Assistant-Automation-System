@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>FRIDAY | Personal Assistant</title>
+  <link rel="stylesheet" href="/dashboard-assets/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="orb">F</span><div><strong>FRIDAY</strong><small>PERSONAL ASSISTANT</small></div></div>
+      <nav>
+        <a class="active" href="#overview">◈ Overview</a>
+        <a href="#email">✉ Email intelligence</a>
+        <a href="#career">◉ Career tracker</a>
+        <a href="#tasks">✓ Tasks</a>
+        <a href="#assistant">✦ Ask FRIDAY</a>
+      </nav>
+      <div class="sidebar-note"><span class="status-dot"></span><span>Local assistant<br><small>Data stays in your configured services</small></span></div>
+    </aside>
+    <main>
+      <header class="topbar"><div><p class="eyebrow">PERSONAL COMMAND CENTER</p><h1>Good to see you.</h1><p class="muted">Your day, distilled into the signals that matter.</p></div><button id="refresh" class="button secondary">↻ Refresh data</button></header>
+      <section id="overview" class="metrics">
+        <article class="metric"><span>Stored emails</span><strong id="stored">—</strong><small>Synced into FRIDAY</small></article>
+        <article class="metric"><span>Need a response</span><strong id="responses">—</strong><small>Heuristic signal</small></article>
+        <article class="metric"><span>Actionable emails</span><strong id="actionable">—</strong><small>Review before acting</small></article>
+        <article class="metric"><span>Pending tasks</span><strong id="pending">—</strong><small>Open items</small></article>
+      </section>
+      <section class="grid two">
+        <article class="panel">
+          <div class="panel-head"><div><p class="eyebrow">YOUR BRIEFING</p><h2>Today's priorities</h2></div><span id="brief-status" class="pill">Loading</span></div>
+          <p class="muted">High-priority emails and pending tasks, assembled from your existing data.</p>
+          <div id="briefing" class="stack"><div class="skeleton"></div><div class="skeleton"></div></div>
+        </article>
+        <article class="panel">
+          <div class="panel-head"><div><p class="eyebrow">INBOX HEALTH</p><h2>Classification mix</h2></div></div>
+          <div id="categories" class="category-list"><div class="skeleton"></div></div>
+          <p class="fineprint">Rule-based classifications can be wrong. Confirm important decisions in the original email.</p>
+        </article>
+      </section>
+      <section id="email" class="panel section">
+        <div class="panel-head"><div><p class="eyebrow">EMAIL INTELLIGENCE</p><h2>Recent analyzed emails</h2></div><div class="filters"><input id="email-search" placeholder="Search sender, subject…" maxlength="200"><select id="category-filter"><option value="">All categories</option><option>JOB</option><option>FINANCE</option><option>PERSONAL</option><option>PROMOTIONS</option><option>UPDATES</option><option>OTHER</option></select><select id="confidence-filter" aria-label="Minimum classification confidence"><option value="">Any confidence</option><option value="60">60%+ confidence</option><option value="80">80%+ confidence</option></select><select id="career-stage-filter" aria-label="Career signal filter"><option value="">All career stages</option><option>OPPORTUNITY</option><option>APPLICATION</option><option>INTERVIEW</option><option>OUTCOME</option><option>FOLLOW_UP</option><option>POSSIBLE_OPPORTUNITY</option></select><select id="deadline-filter" aria-label="Deadline filter"><option value="">Any deadline</option><option value="true">Has detected deadline</option><option value="false">No detected deadline</option></select><button id="search-emails" class="button secondary">Search</button></div></div>
+        <div class="table-wrap"><table><thead><tr><th>Email</th><th>Category</th><th>Priority</th><th>Action signals</th><th>Deadline</th><th>Career intelligence</th></tr></thead><tbody id="email-rows"><tr><td colspan="6" class="muted">Loading emails…</td></tr></tbody></table></div>
+      </section>
+      <section id="career" class="panel section">
+        <div class="panel-head"><div><p class="eyebrow">CAREER PIPELINE</p><h2>Jobs & internships</h2></div><button id="sync-career" class="button secondary">↻ Find opportunities</button></div>
+        <p class="muted">Opportunities are inferred from stored email metadata and snippets. Review each original email before acting.</p>
+        <div id="career-summary" class="metrics career-metrics"><article class="metric"><span>Tracked opportunities</span><strong id="career-total">—</strong><small>From stored email evidence</small></article><article class="metric"><span>Open pipeline</span><strong id="career-open">—</strong><small>Not closed or archived</small></article><article class="metric"><span>Overdue follow-ups</span><strong id="career-overdue">—</strong><small>Review and decide manually</small></article><article class="metric"><span>Next 7 days</span><strong id="career-upcoming">—</strong><small>Scheduled follow-ups</small></article></div>
+        <div class="filters"><select id="career-type"><option value="">All types</option><option value="JOB">Jobs</option><option value="INTERNSHIP">Internships</option></select><select id="career-status"><option value="">All statuses</option><option>DISCOVERED</option><option>INTERESTED</option><option>APPLIED</option><option>INTERVIEWING</option><option>OFFER</option><option>REJECTED</option><option>ARCHIVED</option></select><button id="filter-career" class="button secondary">Filter</button></div>
+        <div id="career-list" class="stack"><p class="muted">Use “Find opportunities” to build the tracker from stored emails.</p></div>
+      </section>
+      <section id="tasks" class="panel section">
+        <div class="panel-head"><div><p class="eyebrow">TASK MANAGEMENT</p><h2>Pending tasks</h2></div><button id="reload-tasks" class="button secondary">Reload tasks</button></div>
+        <form id="task-form" class="task-form"><input id="task-title" placeholder="What needs to get done?" maxlength="200" required><input id="task-due" type="datetime-local" aria-label="Due date (optional)"><button class="button primary" type="submit">+ Add task</button></form>
+        <div id="task-list" class="stack"><div class="skeleton"></div></div>
+      </section>
+      <section id="assistant" class="panel section chat-panel">
+        <div class="panel-head"><div><p class="eyebrow">CONVERSATIONAL ASSISTANT</p><h2>Ask FRIDAY</h2></div><span class="pill">Read-only answers</span></div>
+        <p class="muted">Try “Which emails mention interviews?”, “What tasks are overdue?”, “Which internships should I follow up on?”, then “Which of those are urgent?”</p>
+        <div id="chat-log" class="chat-log"><div class="bubble assistant">I'm ready to search your stored email metadata and tasks. I won't send emails or change tasks from a chat answer.</div></div>
+        <form id="chat-form" class="chat-form"><input id="chat-question" maxlength="1000" placeholder="Ask about your emails or tasks…" required><button class="button primary">Ask</button></form>
+      </section>
+      <footer>FRIDAY runs on your existing backend and database. Signals are suggestions—not guarantees. <span id="last-updated"></span></footer>
+    </main>
+  </div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/dashboard-assets/app.js" defer></script>
+</body>
+</html>
