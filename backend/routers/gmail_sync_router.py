@@ -28,10 +28,10 @@ def get_sync_db() -> Generator[Session, None, None]:
 
 @router.post("/sync", summary="Synchronize recent Gmail metadata into PostgreSQL")
 def sync_gmail_endpoint(
-    max_results: int = Query(default=10, ge=1, le=50),
+    max_results: int = Query(default=10, ge=1, le=500),
     db: Session = Depends(get_sync_db),
 ):
-    """Fetch up to 50 recent messages and insert/update their metadata."""
+    """Fetch up to 500 recent messages across 50-message Gmail API pages."""
     try:
         return sync_gmail_messages(db, max_results=max_results)
     except ValueError as exc:
