@@ -6,13 +6,15 @@ FRIDAY is a local-first personal assistant API built with FastAPI, SQLAlchemy, P
 
 - Task CRUD and scheduled reminders.
 - Gmail OAuth integration and read-only message metadata access.
-- Gmail metadata sync into the local `emails` table.
+- Gmail metadata and readable email-body sync into the local `emails` table.
+- Recursive Gmail MIME extraction, including HTML-only messages and messages incorrectly labelled as plain text.
+- A dry-run-first repair utility for previously stored email bodies that contain raw HTML or unusual Unicode spacing.
 - Rule-based email categorization (`JOB`, `FINANCE`, `PERSONAL`, `PROMOTIONS`, `UPDATES`, `OTHER`), priority scoring, response/action evidence, and conservative deadline detection.
 - Career-related email signals and career stages.
-- Inbox insights, metadata/snippet summaries, search, and explicit task creation from a selected email.
+- Inbox insights, full-stored-body summaries with snippet fallback, body-aware inbox search and question answering, and explicit task creation from a selected email.
 - Optional OpenAI-compatible summary/answer provider; local behavior remains available without an AI key.
 
-**Important limitations:** the current classifier is heuristic and has not been assigned an accuracy score from a manually labeled evaluation set. Current email intelligence is based on stored sender, subject, snippet, and Gmail labels; it does not imply full-body or attachment understanding. Treat detected deadlines/actions as suggestions and verify the original email.
+**Important limitations:** the current classifier is heuristic and has not been assigned an accuracy score from a manually labeled evaluation set. Classification and inbox summaries can use locally stored email body text when available, with snippets as fallback. Attachments are not parsed or analyzed. Treat detected deadlines/actions as suggestions and verify the original email.
 
 ## Requirements
 
@@ -50,21 +52,40 @@ Open `http://127.0.0.1:8000/docs` for interactive API documentation. Keep the se
 
 1. Complete Gmail OAuth locally.
 2. Sync recent metadata using `POST /gmail/sync` or `POST /gmail/intelligence/sync-and-analyze`.
-3. Analyze already stored email metadata using `POST /gmail/intelligence/analyze`.
+3. Analyze already stored email content (sender, subject, snippet, labels, and body text when available) using `POST /gmail/intelligence/analyze`.
 4. Query `/gmail/intelligence/emails` and `/gmail/intelligence/insights`.
 5. Check the source email before acting on any inferred deadline or action.
 
 Analysis and summary endpoints do not modify Gmail messages. Creating a task from an email is an explicit API action.
 
+
+## Email body extraction and repair
+
+FRIDAY prefers a usable `text/plain` MIME part, falls back to HTML converted to readable text, handles nested MIME alternatives, and converts HTML documents that a sender incorrectly labels as `text/plain`. Invisible formatting characters and unusual Unicode spaces are normalized without flattening paragraph breaks. Gmail access remains read-only; only the local database is updated.
+
+If earlier syncs stored raw HTML or unusual Unicode spacing in `emails.body_text`, first inspect candidates with a dry run:
+
+```powershell
+python scripts/repair_email_bodies.py
+```
+
+Then explicitly apply repairs to the local database:
+
+```powershell
+python scripts/repair_email_bodies.py --apply
+```
+
+Optionally restrict a run with `--limit 20`. The repair script fetches each candidate by its stored Gmail message ID, updates only the local `body_text` field, and never sends, labels, archives, or deletes Gmail messages. Back up your database before applying bulk repairs.
+
 ## Tests
 
-Run the automated tests from the project root:
+Run the automated tests from the project root (the test suite uses isolated SQLite databases and does not need your production database URL):
 
 ```powershell
 python -m pytest -q
 ```
 
-Some tests may require environment variables or a configured test database depending on the local setup. Do not point tests at a production database.
+The test configuration forces a SQLite URL for the test process and each database test uses an isolated in-memory engine. It does not connect to your configured PostgreSQL database.
 
 ## Phase 3: classifier evaluation
 
@@ -97,3 +118,17 @@ The script compares the current rules with a TF-IDF + Logistic Regression baseli
 - Do not expose this unauthenticated development API to the public internet.
 - The classifier and optional model output can be wrong; verify important decisions.
 - Do not send real email content to an external model unless you have explicitly configured and approved that data flow.
+
+
+## Phase 4: concise inbox summaries and opportunity extraction
+
+The local `/gmail/intelligence/summary?use_ai=false` path now produces a short, structured digest with separate sections for job/internship opportunities, explicit application-deadline evidence, potentially actionable messages, and other messages. It selects informative sentences instead of returning whole email bodies.
+
+For opportunity-related questions, `/gmail/intelligence/ask` returns concise per-email findings and attempts to extract:
+- role or opportunity subject,
+- sender and a clearly labeled approximate company-name inference from the sender domain,
+- eligibility/qualification evidence when stated,
+- application link when present,
+- deadline evidence only when deadline/action language is connected to a date.
+
+If no explicit deadline evidence is found, the response says so rather than treating the email's received date or an unrelated date as the deadline. The extractor is heuristic and can miss or misinterpret unusual wording; verify consequential details in the source email. Attachments are not analyzed. When an external AI provider is configured, bounded local email context may be sent to that provider; the local fallback does not require an external provider.

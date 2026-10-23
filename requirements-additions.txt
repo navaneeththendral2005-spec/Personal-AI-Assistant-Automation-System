@@ -1,2 +1,0 @@
-# The current FRIDAY project already uses httpx, SQLAlchemy, FastAPI and Pydantic.
-# No additional Python packages are required by this upgrade bundle.

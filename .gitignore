@@ -37,3 +37,8 @@ token.json
 data/email_labels.csv
 reports/*.json
 !reports/.gitkeep
+
+# Local email exports and labels (may contain private email content)
+data/email_dataset.csv
+data/email_labels.csv
+data/email_review_queue.csv
