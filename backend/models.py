@@ -73,6 +73,11 @@ class EmailMessage(Base):
         nullable=True,
     )
 
+    body_text: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
     labels: Mapped[list[str]] = mapped_column(
         JSON,
         nullable=False,

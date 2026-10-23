@@ -43,7 +43,7 @@ def analyze_emails(limit: int = Query(default=100, ge=1, le=500), db: Session = 
 
 
 @router.post("/sync-and-analyze")
-def sync_and_analyze(max_results: int = Query(default=10, ge=1, le=50), db: Session = Depends(get_db)):
+def sync_and_analyze(max_results: int = Query(default=10, ge=1, le=500), db: Session = Depends(get_db)):
     """Sync recent Gmail metadata, then classify the newest stored messages."""
     try:
         from backend.services.gmail_sync_service import sync_gmail_messages

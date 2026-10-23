@@ -1,6 +1,6 @@
 """Explainable email categorization, action extraction, and conservative deadline detection.
 
-This module uses only locally stored sender/subject/snippet/labels. Results are
+This module uses locally stored sender/subject/body/snippet/labels. Results are
 heuristics and must be checked against the original message before acting.
 """
 from __future__ import annotations
@@ -68,7 +68,7 @@ MONTHS = {
 
 
 def _text(message: Any) -> str:
-    values = [getattr(message, key, None) for key in ("sender", "subject", "snippet")]
+    values = [getattr(message, key, None) for key in ("sender", "subject", "snippet", "body_text")]
     values.extend(getattr(message, "labels", None) or [])
     return " ".join(str(value or "") for value in values).lower()
 
@@ -238,7 +238,7 @@ def _deadline_type(text: str, deadline: datetime | None) -> tuple[str, int]:
 
 
 def _career_signals(text: str, sender: str) -> tuple[bool, str, int, list[str]]:
-    """Extract conservative career-stage signals from available metadata/snippet only."""
+    """Extract conservative career-stage signals from locally stored email text."""
     stage_patterns = (
         ("INTERVIEW", ("interview invitation", "interview scheduled", "technical interview", "hr interview", "screening call", "assessment scheduled")),
         ("OUTCOME", ("offer letter", "pleased to offer", "job offer", "we regret to inform", "application rejected", "not selected", "you have been shortlisted", "shortlisted for")),
@@ -287,6 +287,7 @@ def classify_email(message: Any) -> dict[str, Any]:
     sender = str(getattr(message, "sender", "") or "").lower()
     subject = str(getattr(message, "subject", "") or "")
     snippet = str(getattr(message, "snippet", "") or "")
+    body_text = str(getattr(message, "body_text", "") or "")
     labels = {str(label).upper() for label in (getattr(message, "labels", None) or [])}
 
     # Weighted category signals avoid a single weak word dominating a message.
@@ -314,7 +315,7 @@ def classify_email(message: Any) -> dict[str, Any]:
     category_margin = max(0, winning_score - runner_up)
     category_confidence = min(96, 45 + winning_score * 4 + category_margin * 2) if winning_score else 35
     category_reason = (
-        f"Matched {category.lower()} signals in sender, subject, snippet, or Gmail labels (signal score {winning_score})."
+        f"Matched {category.lower()} signals in sender, subject, body, snippet, or Gmail labels (signal score {winning_score})."
         if winning_score else "No strong category signals; classified as OTHER."
     )
 
@@ -392,5 +393,5 @@ def classify_email(message: Any) -> dict[str, Any]:
         "career_stage": career_stage,
         "career_confidence": career_confidence,
         "career_evidence": career_evidence,
-        "summary": _make_summary(subject, snippet),
+        "summary": _make_summary(subject, body_text or snippet),
     }
