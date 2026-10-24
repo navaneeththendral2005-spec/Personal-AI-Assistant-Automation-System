@@ -97,4 +97,84 @@ def test_llm_failure_falls_back_to_rules_and_does_not_fill_true_labels(tmp_path)
     assert row["true_priority"] == ""
     assert row["true_needs_response"] == ""
     assert row["true_category"] == ""
-    assert reviewed == 0  # rules confidence is above the threshold
+    assert reviewed == 1  # LLM failure is always queued, even if rules confidence is high
+    assert _read_rows(tmp_path / "email_review_queue.csv")[0]["review_reason"] == "ollama_failure_rules_fallback"
+
+
+def test_successful_ollama_result_is_cached_across_runs(tmp_path):
+    source = tmp_path / "email_labels.csv"
+    _write_input(source)
+    cache = tmp_path / "cache.sqlite3"
+    calls = {"count": 0}
+
+    def counted_llm(row, *, model, timeout):
+        calls["count"] += 1
+        return _llm_agree(row, model=model, timeout=timeout)
+
+    kwargs = dict(use_llm=True, review_sample_rate=0.0, rules_classifier=_rules,
+                  llm_classifier=counted_llm, cache_path=cache, progress=False)
+    run_auto_labeling(source, **kwargs)
+    assert calls["count"] == 1
+    run_auto_labeling(source, **kwargs)
+    assert calls["count"] == 1
+    row = _read_rows(source)[0]
+    assert row["label_source"] == "rules+ollama_cached"
+
+
+def test_cache_invalidates_when_content_changes(tmp_path):
+    source = tmp_path / "email_labels.csv"
+    _write_input(source)
+    cache = tmp_path / "cache.sqlite3"
+    calls = {"count": 0}
+
+    def counted_llm(row, *, model, timeout):
+        calls["count"] += 1
+        return _llm_agree(row, model=model, timeout=timeout)
+
+    kwargs = dict(use_llm=True, review_sample_rate=0.0, rules_classifier=_rules,
+                  llm_classifier=counted_llm, cache_path=cache, progress=False)
+    run_auto_labeling(source, **kwargs)
+    rows = _read_rows(source)
+    rows[0]["subject"] = "Changed synthetic subject"
+    with source.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=rows[0].keys())
+        writer.writeheader()
+        writer.writerows(rows)
+    run_auto_labeling(source, **kwargs)
+    assert calls["count"] == 2
+
+
+def test_existing_verified_labels_are_never_overwritten(tmp_path):
+    source = tmp_path / "email_labels.csv"
+    _write_input(source)
+    rows = _read_rows(source)
+    rows[0].update({
+        "true_priority": "URGENT",
+        "true_needs_response": "yes",
+        "true_category": "JOB",
+    })
+    with source.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=rows[0].keys())
+        writer.writeheader()
+        writer.writerows(rows)
+
+    run_auto_labeling(source, use_llm=False, review_sample_rate=0.0, rules_classifier=_rules)
+    row = _read_rows(source)[0]
+    assert (row["true_priority"], row["true_needs_response"], row["true_category"]) == (
+        "URGENT", "yes", "JOB"
+    )
+
+
+def test_corrupt_cache_entry_is_ignored_and_recomputed(tmp_path):
+    import sqlite3
+    from scripts.auto_label_emails import OllamaResultCache
+
+    cache_path = tmp_path / "cache.sqlite3"
+    cache = OllamaResultCache(cache_path)
+    cache.put("test-key", _llm_agree({}, model="test", timeout=1)[0], 12.5)
+    with sqlite3.connect(cache_path) as conn:
+        conn.execute("UPDATE ollama_cache SET result_json=? WHERE cache_key=?", ('{"priority":"INVALID"}', "test-key"))
+
+    assert cache.get("test-key") is None
+    with sqlite3.connect(cache_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM ollama_cache WHERE cache_key=?", ("test-key",)).fetchone()[0] == 0

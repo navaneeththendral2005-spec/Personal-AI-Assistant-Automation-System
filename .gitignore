@@ -1,25 +1,30 @@
 # Python
-__pycache__/
+
+**pycache**/
 *.py[cod]
 
 # Virtual environment
+
 .venv/
 venv/
 
-# Secrets
+# Secrets and environment configuration
+
 .env
 .env.*
-
-# Allow the example configuration
 !.env.example
+secrets/
+token.json
 
-# Local databases and personal data
+# Local databases and private email data
+
 data/
 *.db
 *.sqlite
 *.sqlite3
 
-# Testing
+# Testing and coverage
+
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -28,17 +33,12 @@ htmlcov/
 *.log
 
 # Editor
+
 .vscode/
 
-# Google OAuth credentials and tokens
-secrets/
-token.json
-# Private labeled email data and generated evaluation reports
-data/email_labels.csv
-reports/*.json
-!reports/.gitkeep
+# Generated evaluation reports
 
-# Local email exports and labels (may contain private email content)
-data/email_dataset.csv
-data/email_labels.csv
-data/email_review_queue.csv
+reports/*.json
+reports/*.md
+reports/*.csv
+!reports/.gitkeep
