@@ -35,6 +35,13 @@ class EmailAnalysis(Base):
     career_confidence: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     career_evidence: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list, server_default="[]")
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Provenance metadata: production remains rules-based until evaluation supports promotion.
+    classifier_method: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="rules", server_default="rules"
+    )
+    classifier_version: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="friday-rules-v1", server_default="friday-rules-v1"
+    )
     analysis_status: Mapped[str] = mapped_column(String(16), nullable=False, default="complete", index=True)
     analyzed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)

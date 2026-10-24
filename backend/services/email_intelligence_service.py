@@ -54,6 +54,8 @@ def _analysis_payload(row: EmailAnalysis, email: EmailMessage) -> dict[str, Any]
         "career_confidence": row.career_confidence,
         "career_evidence": row.career_evidence or [],
         "summary": row.summary,
+        "classifier_method": row.classifier_method,
+        "classifier_version": row.classifier_version,
         "analysis_status": row.analysis_status,
         "analyzed_at": row.analyzed_at,
     }
@@ -74,6 +76,8 @@ def analyze_stored_emails(db: Session, limit: int = 100) -> dict[str, Any]:
                 db.add(row)
                 for key, value in result.items():
                     setattr(row, key, value)
+                row.classifier_method = "rules"
+                row.classifier_version = "friday-rules-v1"
                 row.analysis_status = "complete"
                 row.analyzed_at = now
                 created += 1
@@ -83,6 +87,8 @@ def analyze_stored_emails(db: Session, limit: int = 100) -> dict[str, Any]:
             if changed or row.analysis_status != "complete":
                 for key, value in result.items():
                     setattr(row, key, value)
+                row.classifier_method = "rules"
+                row.classifier_version = "friday-rules-v1"
                 row.analysis_status = "complete"
                 row.analyzed_at = now
                 updated += 1

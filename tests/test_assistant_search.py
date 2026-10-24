@@ -96,17 +96,21 @@ def test_follow_up_question_uses_recent_topic_and_priority_filter(db):
     assert result["evidence"][0]["priority"] == "URGENT"
 
 
-def test_deadline_question_returns_only_records_with_detected_deadline(db):
-    result = answer_from_stored_data(db, "Which emails have upcoming deadlines?")
+def test_deadline_question_returns_only_upcoming_deadlines(db):
+    now = datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc)
+    result = answer_from_stored_data(db, "Which emails have upcoming deadlines?", now=now)
     assert result["intent"] == "deadlines"
-    assert result["matched_emails"] == 2
+    assert result["matched_emails"] == 1
     assert all(item["detected_deadline"] for item in result["evidence"])
+    assert result["evidence"][0]["subject"] == "AI/ML internship opportunity"
 
 
-def test_overdue_deadline_query_excludes_future_deadlines(db):
-    result = answer_from_stored_data(db, "Which email deadlines are overdue?")
+def test_overdue_deadline_query_returns_past_deadlines_and_excludes_future(db):
+    now = datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc)
+    result = answer_from_stored_data(db, "Which email deadlines are overdue?", now=now)
     assert result["intent"] == "deadlines"
-    assert result["matched_emails"] == 0
+    assert result["matched_emails"] == 1
+    assert result["evidence"][0]["subject"] == "Interview invitation - Python Developer"
 
 
 def test_task_question_reads_tasks_and_does_not_write(db):
