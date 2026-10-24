@@ -125,8 +125,13 @@ def _payload(email: EmailMessage, analysis: EmailAnalysis | None) -> dict[str, A
     }
 
 
-def answer_assistant_question(db: Session, question: str, history: list[dict[str, Any]] | None = None,
-                              limit: int = 20) -> dict[str, Any]:
+def answer_assistant_question(
+    db: Session,
+    question: str,
+    history: list[dict[str, Any]] | None = None,
+    limit: int = 20,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     """Answer a question from locally stored email metadata, analysis, and tasks."""
     question = (question or "").strip()
     if not question:
@@ -135,6 +140,10 @@ def answer_assistant_question(db: Session, question: str, history: list[dict[str
         raise ValueError("Question must be 1000 characters or fewer.")
     if not 1 <= limit <= 50:
         raise ValueError("limit must be between 1 and 50.")
+
+    # Injectable clock makes deadline/task queries deterministic in tests.
+    # Normalize naive datetimes as UTC and aware datetimes to UTC.
+    now_utc = _to_aware(now) if now is not None else datetime.now(timezone.utc)
 
     history = history or []
     q = _normal(question)
@@ -154,13 +163,12 @@ def answer_assistant_question(db: Session, question: str, history: list[dict[str
                     break
 
     if effective_intent in ("tasks", "overdue_tasks"):
-        now = datetime.now(timezone.utc)
         tasks = (db.query(Task).filter(Task.is_completed.is_(False))
                  .order_by(Task.due_at.asc().nullslast(), Task.created_at.desc()).limit(100).all())
         result = []
         for task in tasks:
             due = _to_aware(task.due_at)
-            overdue = bool(due and due < now)
+            overdue = bool(due is not None and due < now_utc)
             if effective_intent == "overdue_tasks" and not overdue:
                 continue
             result.append({"task_id": task.id, "title": task.title, "description": task.description,
@@ -177,7 +185,6 @@ def answer_assistant_question(db: Session, question: str, history: list[dict[str
     rows = (db.query(EmailMessage, EmailAnalysis)
             .outerjoin(EmailAnalysis, EmailAnalysis.email_id == EmailMessage.id)
             .order_by(EmailMessage.message_date.desc(), EmailMessage.id.desc()).limit(500).all())
-    now = datetime.now(timezone.utc)
     candidates: list[tuple[int, EmailMessage, EmailAnalysis | None, list[str]]] = []
     q_tokens = [t for t in re.findall(r"[a-z0-9@._+-]+", q) if len(t) > 2 and t not in STOPWORDS]
     asks_overdue_deadlines = any(x in q for x in ("overdue", "past due", "already due", "expired"))
@@ -212,29 +219,64 @@ def answer_assistant_question(db: Session, question: str, history: list[dict[str
                 reasons.append(f"career-stage signal: {analysis.career_stage} (heuristic confidence {analysis.career_confidence}/100)")
             reasons.append("job or internship opportunity wording" if effective_intent in ("opportunities", "career") else ("internship-related wording" if effective_intent == "internships" else "job or hiring-related wording"))
         elif effective_intent == "deadlines":
-            deadline_aware = _to_aware(deadline) if isinstance(deadline, datetime) else None
-            matched = [t for t in INTENT_TERMS["deadlines"] if t in text]
-            # Apply a requested topic to deadlines too (e.g. internships only).
-            asks_internships = any(t in q for t in ("internship", "internships", "internshala", "intern role"))
-            asks_jobs = any(t in q for t in ("job", "jobs", "career", "graduate trainee", "recruiter"))
-            asks_finance = any(t in q for t in ("finance", "payment", "invoice", "bill", "salary", "tax"))
-            if asks_internships and not any(t in text for t in INTENT_TERMS["internships"]):
+            deadline_aware = (
+            _to_aware(deadline)
+            if isinstance(deadline, datetime)
+            else None
+            )
+            matched = [
+                    term for term in INTENT_TERMS["deadlines"]
+                if term in text
+                ]
+
+            asks_internships = any(
+                term in q
+                for term in ("internship", "internships", "internshala", "intern role")
+                )
+            asks_jobs = any(
+                    term in q
+                    for term in ("job", "jobs", "career", "graduate trainee", "recruiter")
+                    )
+            asks_finance = any(
+                    term in q
+                    for term in ("finance", "payment", "invoice", "bill", "salary", "tax")
+                )
+
+            if asks_internships and not any(
+                    term in text for term in INTENT_TERMS["internships"]
+                ):
+                    continue
+
+            if asks_jobs and not any(
+                term in text for term in INTENT_TERMS["jobs"]
+            ):
                 continue
-            if asks_jobs and not any(t in text for t in INTENT_TERMS["jobs"]):
+
+            if asks_finance and category != "FINANCE" and not any(
+                term in text for term in INTENT_TERMS["finance"]
+            ):
                 continue
-            if asks_finance and category != "FINANCE" and not any(t in text for t in INTENT_TERMS["finance"]):
-                continue
+
             if asks_overdue_deadlines:
-                # An overdue-deadline query only returns dates that are actually in the past.
-                if not deadline_aware or deadline_aware >= now: continue
+                if deadline_aware is None or deadline_aware >= now_utc:
+                    continue
                 score += 12
                 reasons.append("stored deadline is overdue")
-            elif deadline_aware:
+
+            elif any(term in q for term in ("upcoming", "future", "next")):
+                if deadline_aware is None or deadline_aware <= now_utc:
+                    continue
+                score += 12
+                reasons.append("stored upcoming deadline detected")
+
+            elif deadline_aware is not None:
                 score += 12
                 reasons.append("stored deadline detected")
+
             elif matched:
                 score += 5
                 reasons.append("deadline wording found; no normalized date available")
+
             else:
                 continue
         elif effective_intent == "urgent" or filter_priority:
@@ -310,10 +352,17 @@ def answer_assistant_question(db: Session, question: str, history: list[dict[str
             "is_follow_up": is_followup, "write_actions_taken": False, "searched_records": len(rows)}
 
 
-def answer_from_stored_data(db: Session, question: str, history: list[dict[str, Any]] | None = None,
-                            limit: int = 20) -> dict[str, Any]:
-    """Backward-compatible interface used by FRIDAY's career and search modules."""
-    result = answer_assistant_question(db, question, history=history, limit=limit)
+def answer_from_stored_data(
+    db: Session,
+    question: str,
+    history: list[dict[str, Any]] | None = None,
+    limit: int = 20,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Backward-compatible interface; ``now`` is optional for deterministic tests."""
+    result = answer_assistant_question(
+        db, question, history=history, limit=limit, now=now
+    )
     # Preserve the legacy intent label expected by older callers while the current
     # conversational endpoint uses the clearer "career" intent.
     if result.get("intent") == "career":
