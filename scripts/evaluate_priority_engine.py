@@ -16,9 +16,9 @@ from typing import Any
 from scripts.priority_engine_splits import load_or_create_test_ids, row_key
 
 TASKS = {
-    "priority": {"truth": "true_priority", "rules": "rules_priority", "selected": "predicted_priority", "labels": ("URGENT", "NEEDS_REPLY", "INFORMATIONAL", "SPAM")},
-    "needs_response": {"truth": "true_needs_response", "rules": "rules_needs_response", "selected": "predicted_needs_response", "labels": ("yes", "no")},
-    "category": {"truth": "true_category", "rules": "rules_category", "selected": "predicted_category", "labels": ("JOB", "FINANCE", "PERSONAL", "PROMOTIONS", "UPDATES", "OTHER")},
+    "priority": {"truth": "true_priority", "rules": "rules_priority", "selected": "predicted_priority", "ollama": "llm_priority", "labels": ("URGENT", "NEEDS_REPLY", "INFORMATIONAL", "SPAM")},
+    "needs_response": {"truth": "true_needs_response", "rules": "rules_needs_response", "selected": "predicted_needs_response", "ollama": "llm_needs_response", "labels": ("yes", "no")},
+    "category": {"truth": "true_category", "rules": "rules_category", "selected": "predicted_category", "ollama": "llm_category", "labels": ("JOB", "FINANCE", "PERSONAL", "PROMOTIONS", "UPDATES", "OTHER")},
 }
 INVALID = "__INVALID_OR_MISSING__"
 
@@ -150,6 +150,7 @@ def evaluate(input_path: Path, *, test_fraction: float = 0.25, seed: int = 42,
             "frozen_test_manifest_created_this_run": manifest_created,
             "rules": score_column(config["rules"]),
             "stored_selected_predictions": score_column(config["selected"]),
+            "stored_ollama_predictions": score_column(config["ollama"]),
             "tfidf_logistic_regression": metrics(y_true, [_norm(value, task) for value in ml_predictions], normalized_labels),
             "note": "The test IDs are frozen in a private manifest. Do not tune against this holdout. Small samples have high uncertainty.",
         })
@@ -184,7 +185,7 @@ def main() -> int:
         if "message" in result:
             md.append(f"- Note: {result['message']}")
         if "rules" in result:
-            for model_name in ("rules", "stored_selected_predictions", "tfidf_logistic_regression"):
+            for model_name in ("rules", "stored_selected_predictions", "stored_ollama_predictions", "tfidf_logistic_regression"):
                 score = result.get(model_name, {})
                 md.append(f"- {model_name}: macro-F1 `{score.get('macro_f1', 'n/a')}`, accuracy `{score.get('accuracy', 'n/a')}`, coverage `{score.get('prediction_coverage', 'n/a')}`")
         md.append("")

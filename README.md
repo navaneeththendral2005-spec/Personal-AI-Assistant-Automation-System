@@ -132,3 +132,24 @@ For opportunity-related questions, `/gmail/intelligence/ask` returns concise per
 - deadline evidence only when deadline/action language is connected to a date.
 
 If no explicit deadline evidence is found, the response says so rather than treating the email's received date or an unrelated date as the deadline. The extractor is heuristic and can miss or misinterpret unusual wording; verify consequential details in the source email. Attachments are not analyzed. When an external AI provider is configured, bounded local email context may be sent to that provider; the local fallback does not require an external provider.
+
+
+## Optional local classifier experiment (Phase 2)
+
+The production API continues to use the rules classifier until a representative, human-verified evaluation supports a change. Ollama is an **offline labeling/evaluation candidate**, not automatically promoted to production. The labeling script records rules predictions, direct Ollama predictions, the selected provisional prediction, source/status, confidence, latency, and bounded failure details separately. It never fills `true_*` fields.
+
+Install the optional ML package and install/run Ollama locally with a model you have pulled (default model: `qwen3:4b`). Then run from the project root:
+
+```powershell
+# First verify the local Ollama service/model separately. This makes real local inference requests.
+python -m scripts.auto_label_emails --input data/email_labels.csv --model qwen3:4b
+
+# Inspect label_source, llm_status, llm_* columns, and review queue before accepting any labels.
+# Evaluate only after manually entering verified true_* labels.
+python -m scripts.evaluate_priority_engine --input data/email_labels.csv --split-manifest data/priority_engine_split.json
+python -m scripts.evaluate_priority_engine_advanced --input data/email_labels.csv --split-manifest data/priority_engine_split.json
+```
+
+The evaluator compares the rules baseline, stored selected predictions, direct stored Ollama predictions (when available), and a TF-IDF + Logistic Regression baseline on the same frozen holdout. Missing Ollama predictions count as invalid predictions rather than disappearing from the report. Reports contain aggregate metrics only; the split manifest and email CSV remain private under `data/`. Do not tune against the frozen test set or treat generated predictions as ground truth.
+
+The project retains multiple evaluation entry points for backward compatibility: the standard evaluator is the main comparison, the advanced evaluator adds development cross-validation and bootstrap intervals, and the verified-label script is a lightweight compatibility report. The older category-only evaluator is retained for compatibility with existing workflows; new comparisons should use `evaluate_priority_engine.py`.

@@ -1,30 +1,31 @@
 # Python
-
-**pycache**/
+__pycache__/
 *.py[cod]
 
-# Virtual environment
-
+# Virtual environments
 .venv/
 venv/
 
 # Secrets and environment configuration
-
 .env
 .env.*
 !.env.example
 secrets/
 token.json
+credentials.json
+client_secret*.json
 
-# Local databases and private email data
-
+# Local databases, private email data, exports, and model cache
 data/
 *.db
 *.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.bak
+*.backup
 
 # Testing and coverage
-
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -32,12 +33,12 @@ data/
 htmlcov/
 *.log
 
-# Editor
-
+# Editor and OS artifacts
 .vscode/
+.DS_Store
+Thumbs.db
 
 # Generated evaluation reports
-
 reports/*.json
 reports/*.md
 reports/*.csv

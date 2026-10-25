@@ -74,3 +74,32 @@ def test_verified_evaluator_normalizes_case_and_uses_frozen_manifest(tmp_path):
     assert set(saved_again["tasks"]["priority"]["test_ids"]) == old_test_ids
     assert "newly-labeled" not in old_test_ids
     assert second["tasks"]["priority"]["frozen_test_rows"] == first["tasks"]["priority"]["frozen_test_rows"]
+
+
+def test_rules_adapter_preserves_explicit_spam_label_without_treating_promotions_as_spam():
+    from scripts.auto_label_emails import classify_with_rules
+
+    explicit_spam = classify_with_rules({
+        "email_id": "synthetic-spam", "sender": "bulk@example.test",
+        "subject": "Synthetic message", "snippet": "Synthetic content",
+        "body_text": "Synthetic content", "labels": "SPAM|INBOX",
+    })
+    promotion_only = classify_with_rules({
+        "email_id": "synthetic-promo", "sender": "shop@example.test",
+        "subject": "Synthetic offer", "snippet": "Synthetic offer",
+        "body_text": "Synthetic offer", "labels": "CATEGORY_PROMOTIONS|INBOX",
+    })
+    assert explicit_spam["priority"] == "SPAM"
+    assert promotion_only["priority"] != "SPAM"
+
+
+def test_rules_adapter_maps_explicit_response_request_to_needs_reply():
+    from scripts.auto_label_emails import classify_with_rules
+
+    result = classify_with_rules({
+        "email_id": "synthetic-reply", "sender": "person@example.test",
+        "subject": "Please confirm", "snippet": "Please reply to confirm your availability.",
+        "body_text": "Please reply to confirm your availability.", "labels": "INBOX|UNREAD",
+    })
+    assert result["needs_response"] == "yes"
+    assert result["priority"] == "NEEDS_REPLY" or result["priority"] == "URGENT"

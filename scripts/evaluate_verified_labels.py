@@ -70,6 +70,7 @@ def evaluate_verified(input_path: Path, *, output_path: Path, test_fraction: flo
             "frozen_test_manifest_created_this_run": created,
             "rules": score_column(config["rules"]),
             "selected_predictions": score_column(config["selected"]),
+            "ollama_predictions": score_column(config.get("ollama", "")),
             "note": "Invalid or missing predictions count as errors and reduce coverage. Do not tune against this frozen test set.",
         })
         report["tasks"][task] = item
@@ -79,7 +80,7 @@ def evaluate_verified(input_path: Path, *, output_path: Path, test_fraction: flo
     for task, item in report["tasks"].items():
         md += [f"## {task}", f"- Verified labels: {item['verified_labels']}", f"- Status: {item['status']}"]
         if "rules" in item:
-            for name in ("rules", "selected_predictions"):
+            for name in ("rules", "selected_predictions", "ollama_predictions"):
                 score = item[name]
                 md.append(f"- {name}: macro-F1 `{score['macro_f1']}`, accuracy `{score['accuracy']}`, coverage `{score['prediction_coverage']}`")
         elif "message" in item:

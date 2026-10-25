@@ -155,6 +155,8 @@ def evaluate_advanced(
         ml_predictions = [_norm(value, task) for value in model.predict([_features(row) for row in test_rows]).tolist()]
         rules_predictions = [_norm(row.get(config["rules"]), task) for row in test_rows]
         selected_predictions = [_norm(row.get(config["selected"]), task) for row in test_rows]
+        ollama_column = config.get("ollama")
+        ollama_predictions = [_norm(row.get(ollama_column), task) for row in test_rows] if ollama_column else [""] * len(test_rows)
         result.update({
             "status": "holdout_evaluation",
             "development_rows": len(dev_rows),
@@ -164,11 +166,13 @@ def evaluate_advanced(
             "frozen_test": {
                 "rules": metrics(y_true, rules_predictions, labels),
                 "stored_selected_predictions": metrics(y_true, selected_predictions, labels),
+                "stored_ollama_predictions": metrics(y_true, ollama_predictions, labels),
                 "tfidf_logistic_regression": metrics(y_true, ml_predictions, labels),
             },
             "bootstrap_95_percent_intervals": {
                 "rules": bootstrap_intervals(y_true, rules_predictions, labels, iterations=bootstrap_iterations, seed=seed),
                 "stored_selected_predictions": bootstrap_intervals(y_true, selected_predictions, labels, iterations=bootstrap_iterations, seed=seed),
+                "stored_ollama_predictions": bootstrap_intervals(y_true, ollama_predictions, labels, iterations=bootstrap_iterations, seed=seed),
                 "tfidf_logistic_regression": bootstrap_intervals(y_true, ml_predictions, labels, iterations=bootstrap_iterations, seed=seed),
             },
             "note": "Do not tune against the frozen holdout. Metrics are estimates; small test sets have high uncertainty.",

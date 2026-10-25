@@ -98,7 +98,8 @@ def test_llm_failure_falls_back_to_rules_and_does_not_fill_true_labels(tmp_path)
     assert row["true_needs_response"] == ""
     assert row["true_category"] == ""
     assert reviewed == 1  # LLM failure is always queued, even if rules confidence is high
-    assert _read_rows(tmp_path / "email_review_queue.csv")[0]["review_reason"] == "ollama_failure_rules_fallback"
+    assert _read_rows(tmp_path / "email_review_queue.csv")[0]["review_reason"].startswith("ollama_failure_rules_fallback:")
+    assert "synthetic Ollama unavailable" in _read_rows(tmp_path / "email_review_queue.csv")[0]["review_reason"]
 
 
 def test_successful_ollama_result_is_cached_across_runs(tmp_path):
@@ -178,3 +179,28 @@ def test_corrupt_cache_entry_is_ignored_and_recomputed(tmp_path):
     assert cache.get("test-key") is None
     with sqlite3.connect(cache_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM ollama_cache WHERE cache_key=?", ("test-key",)).fetchone()[0] == 0
+
+
+def test_ollama_predictions_are_stored_separately_from_rules_and_selected(tmp_path):
+    source = tmp_path / "email_labels.csv"
+    _write_input(source)
+    run_auto_labeling(
+        source, use_llm=True, review_sample_rate=0.0,
+        rules_classifier=_rules, llm_classifier=_llm_disagree,
+    )
+    row = _read_rows(source)[0]
+    assert row["rules_priority"] == "INFORMATIONAL"
+    assert row["llm_priority"] == "NEEDS_REPLY"
+    assert row["predicted_priority"] == row["llm_priority"]
+    assert row["llm_status"] == "success"
+    assert row["llm_reason"] == "Synthetic test disagreement"
+
+
+def test_no_llm_run_is_marked_rules_only_not_fallback(tmp_path):
+    source = tmp_path / "email_labels.csv"
+    _write_input(source)
+    run_auto_labeling(source, use_llm=False, review_sample_rate=0.0, rules_classifier=_rules)
+    row = _read_rows(source)[0]
+    assert row["label_source"] == "rules_only"
+    assert row["llm_status"] == "disabled"
+    assert row["llm_priority"] == ""

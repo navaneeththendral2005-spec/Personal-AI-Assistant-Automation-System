@@ -30,7 +30,8 @@ LABEL_COLUMNS = ("true_priority", "true_needs_response", "true_category")
 PREDICTION_COLUMNS = (
     "predicted_priority", "predicted_needs_response", "predicted_category",
     "rules_priority", "rules_needs_response", "rules_category",
-    "rules_confidence", "llm_confidence", "label_source", "needs_review",
+    "rules_confidence", "llm_priority", "llm_needs_response", "llm_category",
+    "llm_confidence", "llm_reason", "llm_status", "label_source", "needs_review",
     "review_reason", "llm_model", "llm_latency_ms",
 )
 PROMPT_VERSION = "friday-email-label-v1"
@@ -62,9 +63,14 @@ def classify_with_rules(row: dict[str, str]) -> dict[str, Any]:
         body_text=_text(row, "body_text", int(os.getenv("MAX_BODY_CHARS", "1200"))),
     )
     result = classify_email(message)
+    normalized_labels = {label.upper() for label in message.labels}
     raw_priority = str(result.get("priority", "INFORMATIONAL")).upper()
+    # Preserve an explicit Gmail SPAM label in the target taxonomy. Promotions
+    # alone are not enough evidence to call a message spam.
+    if "SPAM" in normalized_labels:
+        priority = "SPAM"
     # Documented mapping from production priority to target priority.
-    if raw_priority in PRIORITIES:
+    elif raw_priority in PRIORITIES:
         priority = raw_priority
     elif raw_priority in {"HIGH", "CRITICAL", "URGENT"}:
         priority = "URGENT"
@@ -276,8 +282,10 @@ def run_auto_labeling(
         rules = rules_classifier(row)
         llm: dict[str, Any] | None = None
         llm_latency = ""
-        source = "rules_fallback"
+        source = "rules_only" if not use_llm else "rules_fallback"
         ollama_failed = False
+        llm_status = "disabled" if not use_llm else "failed"
+        llm_reason = ""
         if use_llm:
             try:
                 cache_key = cache.key(row, model) if cache else None
@@ -287,12 +295,15 @@ def run_auto_labeling(
                     latency = 0.0  # no inference performed this run; tracked separately
                     cache_hits += 1
                     source = "rules+ollama_cached"
+                    llm_status = "cache_hit"
                 else:
                     llm, latency = llm_classifier(row, model=model, timeout=timeout)
                     if cache and cache_key:
                         cache.put(cache_key, llm, latency)
                     source = "rules+ollama"
+                    llm_status = "success"
                 llm_latency = f"{latency:.2f}"
+                llm_reason = str(llm.get("reason", ""))[:300]
                 llm_ok += 1
                 total_llm_latency += float(latency)
             except Exception as exc:
@@ -301,9 +312,9 @@ def run_auto_labeling(
                 source = "rules_fallback"
                 ollama_failed = True
                 error_detail = str(exc).replace("\n", " ")[:200]
-                row["review_reason"] = (
-                    f"ollama_error:{type(exc).__name__}: {error_detail}"
-                )
+                llm_status = "failed"
+                llm_reason = f"{type(exc).__name__}: {error_detail}"[:300]
+                row["review_reason"] = f"ollama_error:{llm_reason}"
                 fallback_count += 1
                 if progress:
                     print(
@@ -316,7 +327,7 @@ def run_auto_labeling(
         # Failed LLM inference must be reviewed even when rules confidence is high.
         if ollama_failed:
             needs_review = True
-            reason = "ollama_failure_rules_fallback"
+            reason = f"ollama_failure_rules_fallback:{llm_reason}"[:350]
         # Always review a small deterministic sample, even when models agree.
         sampled = rng.random() < review_sample_rate
         if sampled and not needs_review:
@@ -331,7 +342,12 @@ def run_auto_labeling(
             "rules_needs_response": str(rules["needs_response"]),
             "rules_category": str(rules["category"]),
             "rules_confidence": f"{float(rules['confidence']):.3f}",
+            "llm_priority": str(llm["priority"]) if llm else "",
+            "llm_needs_response": str(llm["needs_response"]) if llm else "",
+            "llm_category": str(llm["category"]) if llm else "",
             "llm_confidence": f"{float(llm['confidence']):.3f}" if llm else "",
+            "llm_reason": llm_reason,
+            "llm_status": llm_status,
             "label_source": source,
             "needs_review": "yes" if needs_review else "no",
             "review_reason": reason or row.get("review_reason", ""),
@@ -353,6 +369,12 @@ def run_auto_labeling(
                 "rules_priority": row["rules_priority"],
                 "rules_needs_response": row["rules_needs_response"],
                 "rules_category": row["rules_category"],
+                "llm_priority": row["llm_priority"],
+                "llm_needs_response": row["llm_needs_response"],
+                "llm_category": row["llm_category"],
+                "llm_confidence": row["llm_confidence"],
+                "llm_status": row["llm_status"],
+                "label_source": row["label_source"],
                 "review_reason": row["review_reason"],
                 "true_priority": row.get("true_priority", ""),
                 "true_needs_response": row.get("true_needs_response", ""),
@@ -375,7 +397,8 @@ def run_auto_labeling(
     review_fields = list(review_rows[0].keys()) if review_rows else [
         "email_id", "sender", "subject", "body_text", "predicted_priority",
         "predicted_needs_response", "predicted_category", "rules_priority",
-        "rules_needs_response", "rules_category", "review_reason", *LABEL_COLUMNS,
+        "rules_needs_response", "rules_category", "llm_priority", "llm_needs_response",
+        "llm_category", "llm_confidence", "llm_status", "label_source", "review_reason", *LABEL_COLUMNS,
     ]
     review_temp = review_path.with_suffix(review_path.suffix + ".tmp")
     try:
@@ -394,7 +417,7 @@ def run_auto_labeling(
         print(
             f"Run summary: processed={len(rows)}, ollama_success_including_cache={llm_ok}, "
             f"cache_hits={cache_hits}, ollama_calls={actual_calls}, "
-            f"rules_fallback={fallback_count}, review_queue={len(review_rows)}, "
+            f"rules_fallback={fallback_count}, llm_status_counts={{'success/cache': {llm_ok}, 'failed': {fallback_count}, 'disabled': {len(rows) if not use_llm else 0}}}, review_queue={len(review_rows)}, "
             f"mean_uncached_inference_latency_ms={mean_latency:.2f}, elapsed_seconds={elapsed:.1f}",
             flush=True,
         )
