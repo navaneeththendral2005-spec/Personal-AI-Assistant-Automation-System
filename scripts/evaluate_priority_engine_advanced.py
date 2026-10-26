@@ -69,13 +69,15 @@ def evaluate_advanced(
     }
 
     for task, config in TASKS.items():
-        labels = tuple(label.lower() for label in config["labels"]) if task == "needs_response" else config["labels"]
+        labels = tuple(label.lower() for label in config["labels"]) if task in {"needs_response", "is_spam"} else config["labels"]
         valid = set(labels)
         verified: list[dict[str, str]] = []
         invalid_truth = 0
         for source in rows:
             truth = _norm(source.get(config["truth"]), task)
             if not truth:
+                continue
+            if task == "priority" and truth == "SPAM":
                 continue
             if truth not in valid:
                 invalid_truth += 1
@@ -112,7 +114,7 @@ def evaluate_advanced(
 
         try:
             test_ids, manifest_created = load_or_create_test_ids(
-                rows, task=task, truth_column=config["truth"], labels=config["labels"],
+                rows, task=task, truth_column=config["truth"], labels=config.get("split_labels", config["labels"]),
                 manifest_path=manifest_path, test_fraction=test_fraction, seed=seed,
             )
         except (OSError, ValueError) as exc:
@@ -150,13 +152,29 @@ def evaluate_advanced(
         else:
             cv_summary = {"folds": 0, "status": "insufficient_per_class_development_rows"}
 
+        if len({row["_truth"] for row in dev_rows}) < 2:
+            result.update({
+                "status": "insufficient_training_classes",
+                "message": "The frozen split leaves fewer than two classes in development data; add verified development examples without changing the holdout.",
+                "development_rows": len(dev_rows),
+                "frozen_test_rows": len(test_rows),
+            })
+            report["tasks"][task] = result
+            continue
         model.fit([_features(row) for row in dev_rows], [row["_truth"] for row in dev_rows])
         y_true = [row["_truth"] for row in test_rows]
         ml_predictions = [_norm(value, task) for value in model.predict([_features(row) for row in test_rows]).tolist()]
-        rules_predictions = [_norm(row.get(config["rules"]), task) for row in test_rows]
-        selected_predictions = [_norm(row.get(config["selected"]), task) for row in test_rows]
+        def prediction(row: dict[str, str], column: str | None) -> str:
+            raw = (row.get(column) or "").strip() if column else ""
+            if task == "is_spam" and not raw:
+                fallback = config.get("legacy_prediction_columns", {}).get(column)
+                legacy = (row.get(fallback) or "").strip().upper() if fallback else ""
+                raw = "yes" if legacy == "SPAM" else ("no" if legacy in {"URGENT", "NEEDS_REPLY", "INFORMATIONAL", "HIGH", "NORMAL", "LOW"} else "")
+            return _norm(raw, task)
+        rules_predictions = [prediction(row, config["rules"]) for row in test_rows]
+        selected_predictions = [prediction(row, config["selected"]) for row in test_rows]
         ollama_column = config.get("ollama")
-        ollama_predictions = [_norm(row.get(ollama_column), task) for row in test_rows] if ollama_column else [""] * len(test_rows)
+        ollama_predictions = [prediction(row, ollama_column) for row in test_rows] if ollama_column else [""] * len(test_rows)
         result.update({
             "status": "holdout_evaluation",
             "development_rows": len(dev_rows),

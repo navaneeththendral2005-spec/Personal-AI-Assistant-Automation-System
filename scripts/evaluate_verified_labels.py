@@ -30,12 +30,14 @@ def evaluate_verified(input_path: Path, *, output_path: Path, test_fraction: flo
     }
     for task, config in TASKS.items():
         labels = config["labels"]
-        valid = {label.lower() if task == "needs_response" else label for label in labels}
+        valid = {label.lower() if task in {"needs_response", "is_spam"} else label for label in labels}
         verified = []
         invalid_truth = 0
         for row in rows:
             truth = _norm(row.get(config["truth"]), task)
             if not truth:
+                continue
+            if task == "priority" and truth == "SPAM":
                 continue
             if truth not in valid:
                 invalid_truth += 1
@@ -48,7 +50,7 @@ def evaluate_verified(input_path: Path, *, output_path: Path, test_fraction: flo
             continue
         try:
             test_ids, created = load_or_create_test_ids(
-                rows, task=task, truth_column=config["truth"], labels=labels,
+                rows, task=task, truth_column=config["truth"], labels=config.get("split_labels", labels),
                 manifest_path=manifest, test_fraction=test_fraction, seed=seed,
             )
         except (ImportError, ValueError) as exc:

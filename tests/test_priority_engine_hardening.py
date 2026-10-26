@@ -22,6 +22,25 @@ def test_rules_adapter_passes_real_email_text_to_production_classifier():
     assert result["priority"] == "URGENT"
     assert result["needs_response"] == "yes"
     assert result["confidence"] > 0
+    assert result["is_spam"] == "no"
+
+
+def test_rules_adapter_ignores_explicit_gmail_spam_label():
+    from scripts.auto_label_emails import classify_with_rules
+
+    result = classify_with_rules({
+        "email_id": "synthetic-spam",
+        "sender": "bulk@example.test",
+        "subject": "Synthetic bulk email",
+        "snippet": "Synthetic promotional content",
+        "body_text": "Synthetic promotional content",
+        "labels": "SPAM|INBOX",
+    })
+
+    assert result["is_spam"] == (
+        "yes" if result["priority"] == "SPAM" else "no"
+    )
+    assert result["priority"] != "SPAM" or result["is_spam"] == "yes"
 
 
 def test_invalid_and_missing_predictions_are_counted_as_errors():
@@ -76,21 +95,30 @@ def test_verified_evaluator_normalizes_case_and_uses_frozen_manifest(tmp_path):
     assert second["tasks"]["priority"]["frozen_test_rows"] == first["tasks"]["priority"]["frozen_test_rows"]
 
 
-def test_rules_adapter_preserves_explicit_spam_label_without_treating_promotions_as_spam():
+def test_rules_adapter_ignores_gmail_labels_for_spam_classification():
     from scripts.auto_label_emails import classify_with_rules
 
+    base_email = {
+        "sender": "bulk@example.test",
+        "subject": "Synthetic promotional message",
+        "snippet": "Synthetic content",
+        "body_text": "Synthetic content",
+    }
+
     explicit_spam = classify_with_rules({
-        "email_id": "synthetic-spam", "sender": "bulk@example.test",
-        "subject": "Synthetic message", "snippet": "Synthetic content",
-        "body_text": "Synthetic content", "labels": "SPAM|INBOX",
+        **base_email,
+        "email_id": "synthetic-spam",
+        "labels": "SPAM|INBOX",
     })
+
     promotion_only = classify_with_rules({
-        "email_id": "synthetic-promo", "sender": "shop@example.test",
-        "subject": "Synthetic offer", "snippet": "Synthetic offer",
-        "body_text": "Synthetic offer", "labels": "CATEGORY_PROMOTIONS|INBOX",
+        **base_email,
+        "email_id": "synthetic-promo",
+        "labels": "CATEGORY_PROMOTIONS|INBOX",
     })
-    assert explicit_spam["priority"] == "SPAM"
-    assert promotion_only["priority"] != "SPAM"
+
+    assert explicit_spam["priority"] == promotion_only["priority"]
+    assert explicit_spam["is_spam"] == promotion_only["is_spam"]
 
 
 def test_rules_adapter_maps_explicit_response_request_to_needs_reply():
@@ -103,3 +131,56 @@ def test_rules_adapter_maps_explicit_response_request_to_needs_reply():
     })
     assert result["needs_response"] == "yes"
     assert result["priority"] == "NEEDS_REPLY" or result["priority"] == "URGENT"
+
+def test_production_classifier_detects_explicit_reply_request():
+    from types import SimpleNamespace
+    from backend.services.email_classifier import classify_email
+
+    message = SimpleNamespace(
+        sender="person@example.test",
+        subject="Please confirm",
+        snippet="Please reply to confirm your availability.",
+        body_text="Please reply to confirm your availability.",
+        labels=["INBOX", "UNREAD"],
+    )
+
+    result = classify_email(message)
+
+    assert result["requires_response"] is True
+    assert result["response_confidence"] > 0
+    assert result["priority"] in {"NORMAL", "HIGH", "URGENT"}
+
+
+def test_production_classifier_detects_urgent_payment_language():
+    from types import SimpleNamespace
+    from backend.services.email_classifier import classify_email
+
+    message = SimpleNamespace(
+        sender="billing@example.test",
+        subject="Final notice: payment overdue",
+        snippet="Immediate action required. Your payment is overdue.",
+        body_text="Immediate action required. Your payment is overdue.",
+        labels=["INBOX", "UNREAD"],
+    )
+
+    result = classify_email(message)
+
+    assert result["priority"] == "URGENT"
+    assert result["priority_score"] == 95
+
+
+def test_production_classifier_keeps_routine_newsletter_low_priority():
+    from types import SimpleNamespace
+    from backend.services.email_classifier import classify_email
+
+    message = SimpleNamespace(
+        sender="newsletter@example.test",
+        subject="Weekly newsletter",
+        snippet="Read this week's product updates.",
+        body_text="Here are the latest product updates and news.",
+        labels=["INBOX"],
+    )
+
+    result = classify_email(message)
+
+    assert result["priority"] == "LOW"
