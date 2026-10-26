@@ -153,3 +153,22 @@ python -m scripts.evaluate_priority_engine_advanced --input data/email_labels.cs
 The evaluator compares the rules baseline, stored selected predictions, direct stored Ollama predictions (when available), and a TF-IDF + Logistic Regression baseline on the same frozen holdout. Missing Ollama predictions count as invalid predictions rather than disappearing from the report. Reports contain aggregate metrics only; the split manifest and email CSV remain private under `data/`. Do not tune against the frozen test set or treat generated predictions as ground truth.
 
 The project retains multiple evaluation entry points for backward compatibility: the standard evaluator is the main comparison, the advanced evaluator adds development cross-validation and bootstrap intervals, and the verified-label script is a lightweight compatibility report. The older category-only evaluator is retained for compatibility with existing workflows; new comparisons should use `evaluate_priority_engine.py`.
+
+
+## Safe Ollama evaluation and hybrid routing
+
+To measure Ollama against human-verified labels without modifying `data/email_labels.csv`, run the dedicated isolated evaluator:
+
+```powershell
+python -m scripts.evaluate_ollama_verified --input data/email_labels.csv --output reports/ollama_verified_evaluation.json --split-manifest data/priority_engine_split.json
+```
+
+It copies only rows with at least one non-empty `true_*` value into a temporary workspace, runs local Ollama there, and writes aggregate-only JSON/Markdown reports. The original CSV is left untouched. The private split manifest stays under `data/`; never share or commit it. The first run may create the frozen holdout. If Ollama is unavailable, the command reports an error and the original dataset remains unchanged. A small holdout is exploratory, not proof of model quality.
+
+For a hybrid labeling run that calls Ollama only when the rules confidence is below the threshold:
+
+```powershell
+python -m scripts.auto_label_emails --input data/email_labels.csv --model qwen3:4b --llm-only-when-low-confidence --confidence-threshold 0.65
+```
+
+Rows where rules confidence meets the threshold are marked `label_source=rules_confident` and `llm_status=skipped_confident_rules`. This is an optional experiment only; the production API still uses its existing rules classifier. The threshold is a routing heuristic, not a calibrated probability. Compare macro-F1, per-class recall, coverage, fallback rate, and latency before considering any production change.
