@@ -204,3 +204,25 @@ def test_no_llm_run_is_marked_rules_only_not_fallback(tmp_path):
     assert row["label_source"] == "rules_only"
     assert row["llm_status"] == "disabled"
     assert row["llm_priority"] == ""
+
+
+
+def test_hybrid_mode_skips_ollama_for_confident_rules(tmp_path):
+    source = tmp_path / "email_labels.csv"
+    _write_input(source)
+    calls = {"count": 0}
+
+    def should_not_run(*_args, **_kwargs):
+        calls["count"] += 1
+        raise AssertionError("Ollama should be skipped for confident rules")
+
+    run_auto_labeling(
+        source, use_llm=True, llm_only_when_low_confidence=True,
+        confidence_threshold=0.65, review_sample_rate=0.0, progress=False,
+        rules_classifier=_rules, llm_classifier=should_not_run,
+    )
+    row = _read_rows(source)[0]
+    assert calls["count"] == 0
+    assert row["label_source"] == "rules_confident"
+    assert row["llm_status"] == "skipped_confident_rules"
+    assert row["predicted_priority"] == "INFORMATIONAL"

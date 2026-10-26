@@ -325,12 +325,21 @@ def classify_email(message: Any) -> dict[str, Any]:
     unread = "UNREAD" in labels
     job_interview = any(term in text for term in ("interview", "technical round", "hr round", "assessment scheduled", "screening call", "recruiter call"))
     payment_signal = any(term in text for term in ("payment due", "invoice due", "bill due", "payment overdue", "amount due"))
+    requires_response, response_confidence, response_reason = _response_signal(text)
     if urgent_match:
         score, priority = 95, "URGENT"
         priority_reason = f"Urgent signal: '{urgent_match}'."
     elif high_match or job_interview or (payment_signal and unread):
         score, priority = 78, "HIGH"
-        priority_reason = f"High-priority signal: '{high_match or 'time-sensitive interview/payment signal'}'."
+        priority_reason = (
+            f"High-priority signal: "
+            f"'{high_match or 'time-sensitive interview/payment signal'}'."
+        )
+    elif requires_response:
+        score, priority = 65, "NORMAL"
+        priority_reason = (
+            f"Explicit response required: {response_reason}"
+        )
     elif action_match:
         score, priority = 55, "NORMAL"
         priority_reason = f"Possible action signal: '{action_match}'."
@@ -343,8 +352,6 @@ def classify_email(message: Any) -> dict[str, Any]:
     else:
         score, priority = 35, "NORMAL"
         priority_reason = "No strong urgency signal detected."
-
-    requires_response, response_confidence, response_reason = _response_signal(text)
     actions: list[str] = []
     action_patterns = (
         ("REPLY", ("please reply", "please respond", "let me know", "respond by", "reply to this email", "awaiting your response", "kindly respond", "please get back to me", "let us know")),
