@@ -43,3 +43,4 @@ reports/*.json
 reports/*.md
 reports/*.csv
 !reports/.gitkeep
+reports/*.txt
