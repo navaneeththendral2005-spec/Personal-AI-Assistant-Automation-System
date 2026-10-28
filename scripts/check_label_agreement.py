@@ -1,18 +1,3 @@
-"""Sample verified development emails for blind relabeling and score agreement.
-
-Sample (creates a blind review CSV suitable for scripts.label_emails):
-    python -m scripts.check_label_agreement sample --input data/email_labels.csv \
-        --split-manifest data/priority_engine_split.json --manifest data/relabel_manifest.json \
-        --output data/relabel_review.csv --sample-size 30 --seed 20261027
-
-After relabeling true_* fields in the review CSV, score agreement:
-    python -m scripts.check_label_agreement score --input data/email_labels.csv \
-        --review data/relabel_review.csv --output reports/label_agreement.json
-
-Frozen test IDs are excluded from the relabel sample. The review CSV hides the
-original labels so the second annotation is blind. Reports contain counts/kappa,
-not message content or identifiers.
-"""
 from __future__ import annotations
 
 import argparse
@@ -32,7 +17,8 @@ from scripts.sample_test_v2 import (
     read_frozen_test_ids,
 )
 
-PRIORITY_LABELS = {"URGENT", "NEEDS_REPLY", "INFORMATIONAL", "SPAM"}
+PRIORITY_LABELS = {"URGENT", "NEEDS_REPLY", "INFORMATIONAL"}
+LEGACY_PRIORITY_LABELS = PRIORITY_LABELS | {"SPAM"}
 RESPONSE_LABELS = {"yes", "no"}
 CATEGORY_LABELS = {"JOB", "FINANCE", "PERSONAL", "PROMOTIONS", "UPDATES", "OTHER"}
 SPAM_LABELS = {"yes", "no"}
@@ -45,10 +31,21 @@ TASKS = {
 
 
 def _norm(value: str | None, task: str) -> str:
+    """Normalize harmless formatting variants without guessing label meaning.
+
+    Supported examples include ``needs reply`` -> ``NEEDS_REPLY`` and
+    ``update`` -> ``UPDATES``. The source CSV is never modified.
+    """
     value = (value or "").strip()
     if task in {"is_spam", "needs_response"}:
-        return value.lower()
-    return value.upper()
+        return value.casefold()
+
+    normalized = "_".join(value.upper().replace("-", " ").split())
+    if task == "priority" and normalized in {"NEEDSREPLY", "NEEDS_REPLY"}:
+        return "NEEDS_REPLY"
+    if task == "category" and normalized == "UPDATE":
+        return "UPDATES"
+    return normalized
 
 
 def _first_label(row: dict[str, str], task: str, valid: set[str]) -> tuple[str, str]:
@@ -57,7 +54,7 @@ def _first_label(row: dict[str, str], task: str, valid: set[str]) -> tuple[str, 
         explicit = _norm(row.get("true_is_spam"), task)
         if explicit in valid:
             return explicit, "explicit_true_is_spam"
-        priority = (row.get("true_priority") or "").strip().upper()
+        priority = _norm(row.get("true_priority"), "priority")
         if priority == "SPAM":
             return "yes", "derived_from_legacy_true_priority"
         if priority in PRIORITY_LABELS:
@@ -186,7 +183,42 @@ def cohen_kappa(first: list[str], second: list[str]) -> float | None:
     return (observed - expected) / (1.0 - expected)
 
 
+def _review_validation_errors(review_rows: list[dict[str, str]]) -> dict[str, Any]:
+    """Validate second annotations against EMAIL_LABELING_GUIDE.md.
+
+    Formatting aliases are normalized by ``_norm``. Spam rows must leave
+    priority blank under the current schema; legacy SPAM is only accepted in
+    the original/source dataset for migration-aware spam derivation.
+    """
+    invalid_counts = {task: 0 for task in TASKS}
+    missing_counts = {task: 0 for task in TASKS}
+    schema_conflicts = 0
+
+    for row in review_rows:
+        normalized: dict[str, str] = {}
+        for task, (column, _, valid, _) in TASKS.items():
+            value = _norm(row.get(column), task)
+            normalized[task] = value
+            if not value:
+                # Priority is intentionally blank for spam under the new schema.
+                if task == "priority" and normalized.get("is_spam") == "yes":
+                    continue
+                missing_counts[task] += 1
+            elif value not in valid:
+                invalid_counts[task] += 1
+
+        if normalized.get("is_spam") == "yes" and normalized.get("priority"):
+            schema_conflicts += 1
+
+    return {
+        "invalid_values_by_task": invalid_counts,
+        "missing_values_by_task": missing_counts,
+        "spam_priority_schema_conflicts": schema_conflicts,
+    }
+
+
 def score_agreement(input_path: Path, review_path: Path) -> dict[str, Any]:
+    """Score only schema-valid review annotations; never silently drop bad labels."""
     _, source_rows = read_csv(input_path)
     _, review_rows = read_csv(review_path)
     source_by_id = {(row.get("email_id") or "").strip(): row for row in source_rows}
@@ -196,28 +228,63 @@ def score_agreement(input_path: Path, review_path: Path) -> dict[str, Any]:
     missing = set(review_by_id) - set(source_by_id)
     if missing:
         raise ValueError(f"Review CSV contains {len(missing)} IDs absent from the source dataset")
+    if not review_rows:
+        raise ValueError("Relabel review CSV contains no annotation rows")
+
+    validation = _review_validation_errors(review_rows)
+    invalid_total = sum(validation["invalid_values_by_task"].values())
+    missing_total = sum(validation["missing_values_by_task"].values())
+    conflict_total = validation["spam_priority_schema_conflicts"]
+    if invalid_total or missing_total or conflict_total:
+        # Deliberately aggregate-only: do not include IDs, sender, subject, or body.
+        details = [
+            f"invalid label values={invalid_total}",
+            f"missing required labels={missing_total}",
+            f"spam/priority schema conflicts={conflict_total}",
+        ]
+        raise ValueError(
+            "Review annotations failed validation (" + ", ".join(details) + "). "
+            "No agreement report was written. Check EMAIL_LABELING_GUIDE.md and "
+            "correct the review CSV; formatting aliases such as 'needs reply' and "
+            "'update' are normalized automatically."
+        )
 
     task_results: dict[str, Any] = {}
     for task, (first_column, second_column, valid, _) in TASKS.items():
         first_values: list[str] = []
         second_values: list[str] = []
+        excluded_not_applicable = 0
+        unavailable_source = 0
         for email_id, second_row in review_by_id.items():
             first_row = source_by_id[email_id]
             first, provenance = _first_label(first_row, task, valid)
             second = _norm(second_row.get(second_column), task)
-            if first in valid and second in valid:
-                first_values.append(first)
-                second_values.append(second)
+
+            if task == "priority":
+                # Priority is defined only for non-spam emails in the new schema.
+                source_spam, _ = _first_label(first_row, "is_spam", SPAM_LABELS)
+                if source_spam == "yes":
+                    excluded_not_applicable += 1
+                    continue
+            if first not in valid:
+                unavailable_source += 1
+                continue
+            first_values.append(first)
+            second_values.append(second)
+
         kappa = cohen_kappa(first_values, second_values)
         task_results[task] = {
             "paired_annotations": len(first_values),
             "cohen_kappa": round(kappa, 4) if kappa is not None else None,
             "status": "computed" if kappa is not None else "undefined_or_no_pairs",
+            "source_annotations_unavailable": unavailable_source,
         }
+        if task == "priority":
+            task_results[task]["excluded_source_spam_not_applicable"] = excluded_not_applicable
         if task == "is_spam":
             task_results[task]["first_annotation_policy"] = (
                 "Uses explicit true_is_spam when valid; otherwise derives from legacy true_priority. "
-                "Kappa is provisional for rows using the legacy-derived value."
+                "Legacy-derived values are provisional."
             )
             task_results[task]["legacy_derived_pairs"] = sum(
                 1 for email_id, second_row in review_by_id.items()
@@ -228,6 +295,13 @@ def score_agreement(input_path: Path, review_path: Path) -> dict[str, Any]:
     return {
         "method": "Cohen's kappa (unweighted)",
         "reviewed_emails": len(review_rows),
+        "validation": {
+            "status": "passed",
+            "formatting_aliases_normalized": True,
+            "invalid_values": 0,
+            "missing_required_values": 0,
+            "spam_priority_schema_conflicts": 0,
+        },
         "privacy_note": "Aggregate counts and agreement only; no email IDs or message text.",
         "tasks": task_results,
     }

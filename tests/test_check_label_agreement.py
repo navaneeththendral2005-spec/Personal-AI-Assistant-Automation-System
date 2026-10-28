@@ -113,3 +113,75 @@ def test_score_agreement_uses_only_valid_pairs_and_aggregate_output(tmp_path: Pa
     serialized = json.dumps(report)
     assert '"email_id"' not in serialized
     assert '"a"' not in serialized
+
+
+def test_score_normalizes_supported_formatting_aliases(tmp_path: Path) -> None:
+    source = tmp_path / "source.csv"
+    review = tmp_path / "review.csv"
+    source_rows = [{
+        "email_id": "synthetic-1",
+        "true_is_spam": "no",
+        "true_priority": "NEEDS_REPLY",
+        "true_needs_response": "yes",
+        "true_category": "UPDATES",
+    }]
+    review_rows = [{
+        "email_id": "synthetic-1",
+        "true_is_spam": " NO ",
+        "true_priority": "needs reply",
+        "true_needs_response": "YES",
+        "true_category": "update",
+    }]
+    write_csv(source, source_rows)
+    write_csv(review, review_rows)
+
+    report = score_agreement(source, review)
+
+    assert report["validation"]["status"] == "passed"
+    assert report["tasks"]["priority"]["paired_annotations"] == 1
+    assert report["tasks"]["category"]["paired_annotations"] == 1
+    assert report["tasks"]["priority"]["cohen_kappa"] == 1.0
+
+
+def test_score_refuses_invalid_or_missing_annotations_without_identifying_rows(tmp_path: Path) -> None:
+    source = tmp_path / "source.csv"
+    review = tmp_path / "review.csv"
+    write_csv(source, [{
+        "email_id": "private-email-id",
+        "true_is_spam": "no",
+        "true_priority": "URGENT",
+        "true_needs_response": "no",
+        "true_category": "JOB",
+    }])
+    write_csv(review, [{
+        "email_id": "private-email-id",
+        "true_is_spam": "maybe",
+        "true_priority": "",
+        "true_needs_response": "no",
+        "true_category": "JOB",
+    }])
+
+    with pytest.raises(ValueError, match="failed validation") as exc_info:
+        score_agreement(source, review)
+
+    message = str(exc_info.value)
+    assert "invalid label values=" in message
+    assert "missing required labels=" in message
+    assert "private-email-id" not in message
+
+
+def test_score_rejects_spam_rows_with_priority_under_new_schema(tmp_path: Path) -> None:
+    source = tmp_path / "source.csv"
+    review = tmp_path / "review.csv"
+    row = {
+        "email_id": "synthetic-spam",
+        "true_is_spam": "yes",
+        "true_priority": "SPAM",
+        "true_needs_response": "no",
+        "true_category": "PROMOTIONS",
+    }
+    write_csv(source, [row])
+    write_csv(review, [row])
+
+    with pytest.raises(ValueError, match="spam/priority schema conflicts=1"):
+        score_agreement(source, review)

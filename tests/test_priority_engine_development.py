@@ -82,3 +82,31 @@ def test_development_evaluation_fails_on_duplicate_source_keys(tmp_path):
     manifest.write_text(json.dumps({"version": 1, "tasks": {}}), encoding="utf-8")
     with pytest.raises(ValueError, match="duplicate row keys"):
         evaluate_development(dataset, manifest)
+
+def test_spam_error_diagnostics_report_aggregate_counts_only():
+    from scripts.evaluate_priority_engine_development import (
+        _spam_error_diagnostics,
+    )
+
+    report = _spam_error_diagnostics(
+        y_true=["yes", "no", "yes", "no"],
+        rules_predictions=["no", "no", "yes", "yes"],
+        word_predictions=["no", "yes", "no", "no"],
+        char_predictions=["no", "yes", "yes", "no"],
+    )
+
+    assert report["word_tfidf"]["false_positives"] == 1
+    assert report["word_tfidf"]["false_negatives"] == 2
+
+    assert report["char_tfidf"]["false_positives"] == 1
+    assert report["char_tfidf"]["false_negatives"] == 1
+
+    assert report["rules"]["total_errors"] == 2
+
+    shared = report["word_char_shared_errors"]
+
+    assert shared["total"] == 2
+    assert shared["actual_spam_missed_by_both"] == 1
+    assert shared["non_spam_flagged_by_both"] == 1
+    assert shared["rules_correct_on_shared_errors"] == 1
+    assert shared["rules_also_wrong_on_shared_errors"] == 1

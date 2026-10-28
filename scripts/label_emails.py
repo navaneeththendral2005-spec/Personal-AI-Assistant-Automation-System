@@ -1,16 +1,3 @@
-"""Interactively label locally exported emails and save after every email.
-
-Run:
-    python -m scripts.label_emails --input data/email_labels.csv
-    python -m scripts.label_emails --input data/email_labels.csv --queue data/email_review_queue.csv
-    python -m scripts.label_emails --input data/email_labels.csv --limit 10
-
-Keyboard shortcuts:
-    Enter = leave a new field blank
-    q     = quit safely, saving progress
-
-Ground-truth fields use true_* names. Predictions are suggestions only.
-"""
 from __future__ import annotations
 
 import argparse
@@ -27,14 +14,12 @@ CATEGORIES = ("JOB", "FINANCE", "PERSONAL", "PROMOTIONS", "UPDATES", "OTHER")
 LABEL_FIELDS = ("true_is_spam", "true_priority", "true_needs_response", "true_category")
 LEGACY_LABEL_FIELDS = ("true_priority", "true_needs_response", "true_category")
 
-
 def _source_has_spam_column(path: Path) -> bool:
     """Distinguish new-schema files from legacy CSVs to preserve old workflows."""
     with path.open("r", newline="", encoding="utf-8-sig") as handle:
         reader = csv.reader(handle)
         header = next(reader, [])
     return "true_is_spam" in header
-
 
 def load_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     """Load the CSV and add missing target-label columns without dropping data."""
@@ -65,7 +50,6 @@ def load_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
                 row["true_is_spam"] = "no"
     return fieldnames, rows
 
-
 def save_rows(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
     """Atomically save the CSV without leaving a temporary file behind."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -79,7 +63,6 @@ def save_rows(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> 
     finally:
         if temp_path.exists():
             temp_path.unlink()
-
 
 def _ask_choice(
     prompt: str,
@@ -123,7 +106,6 @@ def _legacy_fully_labeled(row: dict[str, str]) -> bool:
         and (row.get("true_category") or "").strip() in CATEGORIES
     )
 
-
 def _load_queue_ids(queue_path: Path) -> set[str]:
     """Load email IDs from a review queue CSV."""
     if not queue_path.is_file():
@@ -134,14 +116,12 @@ def _load_queue_ids(queue_path: Path) -> set[str]:
             raise ValueError("Review queue CSV must contain an email_id column")
         return {(row.get("email_id") or "").strip() for row in reader if (row.get("email_id") or "").strip()}
 
-
 def _quit(path: Path, fields: list[str], rows: list[dict[str, str]], done: int,
           output: TextIO, *, legacy: bool) -> tuple[int, int]:
     save_rows(path, fields, rows)
     complete = sum(_legacy_fully_labeled(r) if legacy else _fully_labeled(r) for r in rows)
     print("Progress saved; exiting.", file=output)
     return done, complete
-
 
 def label_dataset(
     path: Path,
@@ -305,7 +285,6 @@ def label_dataset(
     print(f"Finished this pass: {done} emails completed; {total}/{len(rows)} fully labeled.", file=output)
     return done, total
 
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=Path("data/email_labels.csv"))
@@ -318,7 +297,6 @@ def main() -> int:
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
