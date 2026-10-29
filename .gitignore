@@ -44,3 +44,6 @@ reports/*.md
 reports/*.csv
 !reports/.gitkeep
 reports/*.txt
+
+# Private evaluation split manifest
+data/priority_engine_split.json
