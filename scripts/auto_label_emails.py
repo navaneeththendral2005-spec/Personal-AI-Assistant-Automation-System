@@ -1,13 +1,3 @@
-"""Generate provisional email labels locally and build a selective-review queue.
-
-This tool never writes to Gmail and never treats model predictions as verified
-labels. It reads data/email_labels.csv and writes provisional prediction columns
-plus a separate review queue. Email content remains local when Ollama is used.
-
-Run from the project root:
-    python -m scripts.auto_label_emails --input data/email_labels.csv
-    python -m scripts.auto_label_emails --input data/email_labels.csv --no-llm
-"""
 from __future__ import annotations
 
 import argparse
@@ -43,11 +33,9 @@ SYSTEM_PROMPT = (
     "Return only JSON matching the requested schema. Do not invent facts."
 )
 
-
 def _text(row: dict[str, str], key: str, limit: int | None = None) -> str:
     value = (row.get(key) or "").strip()
     return value[:limit] if limit else value
-
 
 def classify_with_rules(row: dict[str, str]) -> dict[str, Any]:
     """Call FRIDAY's existing production rules on the same available text fields."""
@@ -94,7 +82,6 @@ def classify_with_rules(row: dict[str, str]) -> dict[str, Any]:
         "raw": result,
     }
 
-
 def classify_with_ollama(
     row: dict[str, str], *, model: str, timeout: float = 45.0,
     opener: Callable[..., Any] = urllib.request.urlopen,
@@ -133,12 +120,39 @@ def classify_with_ollama(
         parsed = json.loads(content)
     except (TypeError, json.JSONDecodeError) as exc:
         raise ValueError("Ollama returned invalid JSON") from exc
-    priority = str(parsed.get("priority", "")).upper()
-    needs_response = str(parsed.get("needs_response", "")).lower()
-    category = str(parsed.get("category", "")).upper()
-    confidence = float(parsed.get("confidence", 0.0))
-    if priority not in PRIORITIES or needs_response not in {"yes", "no"} or category not in CATEGORIES:
-        raise ValueError("Ollama returned a label outside the allowed values")
+    def normalize_label(value: Any) -> str:
+        """Normalize a model label without converting missing values to strings."""
+        if not isinstance(value, str):
+            return ""
+        return value.strip().upper()
+
+    def normalize_yes_no(value: Any) -> str:
+        """Normalize supported yes/no responses."""
+        if not isinstance(value, str):
+            return ""
+        return value.strip().lower()
+
+    priority = normalize_label(parsed.get("priority"))
+    needs_response = normalize_yes_no(parsed.get("needs_response"))
+    category = normalize_label(parsed.get("category"))
+
+    if (
+        priority not in PRIORITIES
+        or needs_response not in {"yes", "no"}
+        or category not in CATEGORIES
+    ):
+        raise ValueError(
+            "Ollama returned a label outside the allowed values "
+            f"(priority_valid={priority in PRIORITIES}, "
+            f"needs_response_valid={needs_response in {'yes', 'no'}}, "
+            f"category_valid={category in CATEGORIES})"
+        )
+
+    try:
+        confidence = float(parsed.get("confidence", 0.0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Ollama confidence must be a number between 0 and 1") from exc
+
     if not 0 <= confidence <= 1:
         raise ValueError("Ollama confidence must be between 0 and 1")
     return {
@@ -147,7 +161,6 @@ def classify_with_ollama(
         "category": category, "confidence": confidence,
         "reason": str(parsed.get("reason", ""))[:300],
     }, latency_ms
-
 
 def _needs_review(
     rules: dict[str, Any], llm: dict[str, Any] | None, *, confidence_threshold: float,
@@ -165,7 +178,6 @@ def _needs_review(
     if min(float(rules["confidence"]), float(llm["confidence"])) < confidence_threshold:
         return True, "low_model_confidence"
     return False, ""
-
 
 class OllamaResultCache:
     """Local SQLite cache; stores hashes and validated predictions, never email text."""
@@ -235,7 +247,6 @@ class OllamaResultCache:
         with sqlite3.connect(self.path) as conn:
             conn.execute("INSERT OR REPLACE INTO ollama_cache(cache_key,result_json,latency_ms) VALUES(?,?,?)",
                          (key, json.dumps(safe_result, sort_keys=True), float(latency_ms)))
-
 
 def run_auto_labeling(
     input_path: Path, *, use_llm: bool = True, model: str = "qwen3:4b",
@@ -437,7 +448,6 @@ def run_auto_labeling(
         )
     return len(rows), len(review_rows)
 
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=Path("data/email_labels.csv"))
@@ -462,7 +472,6 @@ def main() -> None:
     print(f"Predictions: {args.input}")
     print(f"Review queue: {args.input.with_name('email_review_queue.csv')}")
     print("IMPORTANT: predicted_* values are provisional. true_* labels were not auto-filled.")
-
 
 if __name__ == "__main__":
     main()
