@@ -184,3 +184,118 @@ def test_production_classifier_keeps_routine_newsletter_low_priority():
     result = classify_email(message)
 
     assert result["priority"] == "LOW"
+
+def test_production_classifier_does_not_mark_negated_urgency_as_urgent():
+    from types import SimpleNamespace
+    from backend.services.email_classifier import classify_email
+
+    message = SimpleNamespace(
+        sender="updates@example.test",
+        subject="Account status update",
+        snippet="Your account has not been suspended.",
+        body_text="Your account has not been suspended. No action is required.",
+        labels=["INBOX", "READ"],
+    )
+
+    result = classify_email(message)
+
+    assert result["priority"] != "URGENT"
+
+
+def test_production_classifier_does_not_mark_routine_promotion_urgent():
+    from types import SimpleNamespace
+    from backend.services.email_classifier import classify_email
+
+    message = SimpleNamespace(
+        sender="offers@example.test",
+        subject="Limited-time offers",
+        snippet="Discover this week's discounts.",
+        body_text=(
+            "Explore our latest offers and seasonal discounts. "
+            "Browse whenever convenient."
+        ),
+        labels=["INBOX", "CATEGORY_PROMOTIONS"],
+    )
+
+    result = classify_email(message)
+
+    assert result["priority"] != "URGENT"
+    assert result["requires_response"] is False
+
+
+def test_production_classifier_detects_genuine_payment_deadline():
+    from types import SimpleNamespace
+    from backend.services.email_classifier import classify_email
+
+    message = SimpleNamespace(
+        sender="billing@example.test",
+        subject="Payment due today",
+        snippet="Your outstanding payment must be completed today.",
+        body_text=(
+            "Your payment is due today. Please complete the payment "
+            "before the deadline to avoid service interruption."
+        ),
+        labels=["INBOX", "UNREAD"],
+    )
+
+    result = classify_email(message)
+
+    assert result["priority"] in {"HIGH", "URGENT"}
+
+
+def test_production_classifier_does_not_infer_response_from_newsletter():
+    from types import SimpleNamespace
+    from backend.services.email_classifier import classify_email
+
+    message = SimpleNamespace(
+        sender="newsletter@example.test",
+        subject="Your weekly technology digest",
+        snippet="Read our latest articles and product updates.",
+        body_text=(
+            "This week: new product announcements, industry analysis, "
+            "and helpful articles. Read more on our website."
+        ),
+        labels=["INBOX"],
+    )
+
+    result = classify_email(message)
+
+    assert result["requires_response"] is False
+
+def test_production_classifier_does_not_mark_negated_security_breach_urgent():
+    from types import SimpleNamespace
+    from backend.services.email_classifier import classify_email
+
+    message = SimpleNamespace(
+        sender="security@example.test",
+        subject="Security status update",
+        snippet="There is no security breach affecting your account.",
+        body_text=(
+            "There is no security breach affecting your account. "
+            "Your account remains secure. No action is required."
+        ),
+        labels=["INBOX", "READ"],
+    )
+
+    result = classify_email(message)
+
+    assert result["priority"] != "URGENT"
+
+def test_production_classifier_does_not_mark_educational_security_content_urgent():
+    from types import SimpleNamespace
+    from backend.services.email_classifier import classify_email
+
+    message = SimpleNamespace(
+        sender="newsletter@example.test",
+        subject="How security breaches happen",
+        snippet="Learn how companies respond to security breaches.",
+        body_text=(
+            "This educational newsletter explains how security breaches "
+            "happen and how organizations can prevent them."
+        ),
+        labels=["INBOX", "CATEGORY_UPDATES"],
+    )
+
+    result = classify_email(message)
+
+    assert result["priority"] != "URGENT"

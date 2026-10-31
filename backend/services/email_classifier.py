@@ -1,8 +1,3 @@
-"""Explainable email categorization, action extraction, and conservative deadline detection.
-
-This module uses locally stored sender/subject/body/snippet/labels. Results are
-heuristics and must be checked against the original message before acting.
-"""
 from __future__ import annotations
 
 import re
@@ -76,6 +71,48 @@ def _text(message: Any) -> str:
 def _has_any(text: str, terms: tuple[str, ...]) -> bool:
     return any(term in text for term in terms)
 
+
+def _find_urgent_match(text: str) -> str | None:
+    """Find actionable urgent signals while filtering negation and educational context."""
+
+    negation_pattern = re.compile(
+        r"\b(?:no|not|never|without|isn't|aren't|wasn't|weren't|"
+        r"hasn't|haven't|hadn't|doesn't|don't|didn't)\b"
+        r"(?:\W+\w+){0,5}\W*$",
+        re.IGNORECASE,
+    )
+
+    informational_pattern = re.compile(
+        r"\b(?:how|learn|understand|explains?|explained|guide|"
+        r"article|newsletter|tutorial|prevent|prevention)\b",
+        re.IGNORECASE,
+    )
+
+    for term in URGENT_TERMS:
+        pattern = re.compile(re.escape(term), re.IGNORECASE)
+
+        for match in pattern.finditer(text):
+            start = text.rfind(".", 0, match.start()) + 1
+            sentence_end = text.find(".", match.end())
+
+            if sentence_end == -1:
+                sentence_end = len(text)
+
+            sentence = text[start:sentence_end].strip()
+            prefix = text[start:match.start()]
+
+            # Ignore urgent phrases explicitly negated in their sentence.
+            if negation_pattern.search(prefix):
+                continue
+
+            # Security-breach discussions are not necessarily active incidents.
+            if term == "security breach":
+                if informational_pattern.search(sentence):
+                    continue
+
+            return term
+
+    return None
 
 def _deadline_end_of_day(year: int, month: int, day: int) -> datetime | None:
     try:
@@ -319,7 +356,7 @@ def classify_email(message: Any) -> dict[str, Any]:
         if winning_score else "No strong category signals; classified as OTHER."
     )
 
-    urgent_match = next((term for term in URGENT_TERMS if term in text), None)
+    urgent_match = _find_urgent_match(text)
     high_match = next((term for term in HIGH_TERMS if term in text), None)
     action_match = next((term for term in ACTION_TERMS if term in text), None)
     unread = "UNREAD" in labels
