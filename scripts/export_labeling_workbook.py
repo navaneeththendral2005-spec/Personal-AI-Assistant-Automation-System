@@ -32,8 +32,9 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "labeling"
 DEFAULT_QUEUE = PROJECT_ROOT / "data" / "labeling_queue_minority.csv"
 DEFAULT_SPLIT_MANIFEST = PROJECT_ROOT / "data" / "priority_engine_split.json"
 DEFAULT_TEST_MANIFEST = PROJECT_ROOT / "data" / "test_v2_manifest.json"
-SCHEMA_VERSION = "v2"
-GUIDE_VERSION = "v2.0-draft"
+SCHEMA_VERSION = "v2.1"
+GUIDE_PATH = PROJECT_ROOT / "docs" / "EMAIL_LABELING_GUIDE.md"
+GUIDE_VERSION = "v2.1"
 DEFAULT_SEED = 20261031
 DEFAULT_BATCH_SIZE = 40
 DEFAULT_BODY_PREVIEW_CHARS = 1500
@@ -41,7 +42,7 @@ MAX_CELL_CHARS = 32767
 
 YES_NO = ("yes", "no")
 PRIORITIES = ("URGENT", "NEEDS_REPLY", "INFORMATIONAL")
-CATEGORIES = ("JOB", "FINANCE", "PERSONAL", "PROMOTIONS", "UPDATES", "OTHER")
+CATEGORIES = ("JOB", "FINANCE", "PROMOTIONS", "UPDATES", "OTHER")
 LABEL_COLUMNS = ("is_spam", "needs_response", "priority", "category", "unsure", "note")
 VISIBLE_COLUMNS = ("row_number", "email_id", "sender", "subject", "snippet", "body_preview", *LABEL_COLUMNS)
 FORBIDDEN_COLUMN_PREFIXES = ("true_", "final_", "predicted_", "rules_", "llm_")
@@ -49,34 +50,31 @@ FORBIDDEN_EXACT = {"label_source"}
 
 XML_ILLEGAL = re.compile("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\uFFFE\\uFFFF]")
 
-GUIDE_ROWS = [
-    ("Schema", "FRIDAY email labeling schema v2; guide v2.0-draft (20-email pilot draft)."),
-    ("is_spam=yes", "Unwanted, deceptive, or unsolicited content, including phishing, impersonation, scams, malicious links/attachments, and irrelevant unsolicited bulk mail."),
-    ("is_spam=no", "Legitimate correspondence, expected service notices, and marketing from an organization or mailing list the recipient signed up for. Automation alone is not spam."),
-    ("needs_response=yes", "A real person or organization is genuinely waiting for a reply, confirmation, decision, requested information, or action from you."),
-    ("needs_response=no", "No response or action is expected. The fact that you could optionally reply, click, or read does not make it required."),
-    ("URGENT", "A genuinely time-sensitive or high-impact matter requiring prompt attention. Look for an imminent event, stated deadline, active incident, or material consequence; ignore dramatic wording alone."),
-    ("NEEDS_REPLY", "A reply, confirmation, decision, or requested information is expected, but immediate handling is not established."),
-    ("INFORMATIONAL", "No response is expected and no separate urgent action is established."),
-    ("JOB", "Recruitment, job openings, internships, applications, interviews, assessments, offers, and employment opportunities."),
-    ("FINANCE", "Banking, payments, bills, invoices, taxes, transactions, and financial services."),
-    ("PERSONAL", "Direct communication involving friends, family, or personal acquaintances, including personal arrangements."),
-    ("PROMOTIONS", "Legitimate marketing, discounts, sales, product offers, and promotional newsletters."),
-    ("UPDATES", "Service, account, delivery, subscription-status, product/system, and transaction-status notifications whose primary purpose is to inform."),
-    ("OTHER", "A relevant email that does not fit the other five categories. Do not use OTHER as a substitute for uncertainty."),
-    ("Decision order", "Read context; decide spam; decide whether a response/action is expected; decide urgency; assign the primary category; mark uncertainty honestly."),
-    ("Consistency", "needs_response=yes cannot pair with INFORMATIONAL. needs_response=no cannot pair with NEEDS_REPLY. URGENT may pair with needs_response=no when immediate action is needed but no reply is expected. Flag conflicts; never auto-correct."),
-    ("Spam vs PROMOTIONS", "Subscribed, legitimate marketing = is_spam=no and PROMOTIONS. Deceptive, unwanted, or unsolicited bulk content = is_spam=yes."),
-    ("Spam/PROMOTIONS examples", "Synthetic: a subscribed bookstore discount newsletter = is_spam=no, PROMOTIONS. A fake prize email asking for a bank password = is_spam=yes."),
-    ("UPDATES vs PROMOTIONS", "Existing-service/account/status information = UPDATES. Persuasion to buy, subscribe, upgrade, or use an offer = PROMOTIONS."),
-    ("UPDATES/PROMOTIONS examples", "Synthetic: a cloud subscription renewal confirmation = UPDATES. An email urging an upgrade with a 30% discount = PROMOTIONS."),
-    ("PERSONAL vs OTHER", "A direct message involving a recognizable personal relationship/arrangement = PERSONAL. Otherwise use the best-fitting category or OTHER."),
-    ("PERSONAL/OTHER examples", "Synthetic: a friend asking about Saturday dinner = PERSONAL. A public residents association agenda notice = OTHER."),
-    ("Response/priority examples", "Synthetic: confirm an interview slot by 5 PM today = needs_response=yes, URGENT. An automated active-security notice requiring immediate password reset but no reply = needs_response=no, URGENT."),
-    ("When unsure", "Set unsure=yes, explain briefly in note, and leave only genuinely uncertain task fields blank. Never guess or consult model outputs/old labels."),
-    ("Body preview", "The workbook contains a configurable body preview (default 1,500 characters). The full body remains in the local database and can be recovered using email_id; do not copy full bodies into documentation or reports."),
-    ("Pilot and freeze", "Label 20 emails first. Review difficult cases once, refine the guide once, then freeze a final version. Any later semantic change requires a new guide version, changelog entry, and identification/relabeling of affected rows."),
-]
+def _load_guide_rows(guide_path: Path = GUIDE_PATH) -> tuple[str, list[tuple[str, str]]]:
+    """Load the canonical Markdown guide; workbook Guide sheet mirrors this file."""
+    if not guide_path.is_file():
+        raise WorkbookExportError("Canonical labeling guide is missing: docs/EMAIL_LABELING_GUIDE.md")
+    text = guide_path.read_text(encoding="utf-8")
+    match = re.search(r"^\*\*Guide version:\*\*\s*`([^`]+)`", text, re.MULTILINE)
+    status = re.search(r"^\*\*Status:\*\*\s*(.+)$", text, re.MULTILINE)
+    if not match or match.group(1) != GUIDE_VERSION or not status or "FROZEN" not in status.group(1).upper():
+        raise WorkbookExportError("Canonical labeling guide must declare frozen guide version v2.1.")
+    rows: list[tuple[str, str]] = []
+    section = "Guide"
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            section = line.lstrip("# ")[:120] or "Guide"
+            rows.append((section, ""))
+        elif line.startswith("|"):
+            rows.append((section, line))
+        elif line.startswith(">"):
+            rows.append((section, line.lstrip("> ")))
+        else:
+            rows.append((section, line))
+    return match.group(1), rows
 
 
 class WorkbookExportError(ValueError):
@@ -247,6 +245,7 @@ def _backup_existing(path: Path, backup_dir: Path) -> Path:
 def _write_workbook(
     output_path: Path, selected_rows: list[dict[str, str]], *, purpose: str,
     mode: str, batch_name: str, body_preview_chars: int, schema_version: str = SCHEMA_VERSION,
+    guide_path: Path = GUIDE_PATH,
 ) -> None:
     wb = Workbook()
     ws = wb.active
@@ -345,11 +344,12 @@ def _write_workbook(
             ),
         )
 
-    guide.append(["Topic", "Definition and decision rule"])
+    guide_version, guide_rows = _load_guide_rows(guide_path)
+    guide.append(["Guide section", "Canonical v2.1 guide content"])
     for cell in guide[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = header_fill
-    for item in GUIDE_ROWS:
+    for item in guide_rows:
         guide.append(list(item))
     guide.column_dimensions["A"].width = 25
     guide.column_dimensions["B"].width = 115
@@ -365,7 +365,7 @@ def _write_workbook(
     progress.append(["Mode", mode])
     progress.append(["Purpose", purpose])
     progress.append(["Schema version", schema_version])
-    progress.append(["Guide version", GUIDE_VERSION])
+    progress.append(["Guide version", guide_version])
     progress.append(["Rows in this workbook", f"=COUNTA(Labeling!$A$2:$A${ws.max_row})"])
     progress.append(["Fully labeled rows", f'=COUNTIFS(Labeling!$G$2:$G${ws.max_row},"<>",Labeling!$H$2:$H${ws.max_row},"<>",Labeling!$I$2:$I${ws.max_row},"<>",Labeling!$J$2:$J${ws.max_row},"<>")'])
     progress.append(["Remaining rows", "=B7-B8"])
@@ -411,6 +411,7 @@ def export_labeling_workbook(
     body_preview_chars: int = DEFAULT_BODY_PREVIEW_CHARS,
     queue_path: Path = DEFAULT_QUEUE, split_manifest: Path = DEFAULT_SPLIT_MANIFEST,
     test_manifest: Path = DEFAULT_TEST_MANIFEST, overwrite: bool = False,
+    guide_path: Path = GUIDE_PATH,
 ) -> dict[str, Any]:
     if mode not in {"relabel", "minority", "test_v2", "random"}:
         raise WorkbookExportError("Unsupported selection mode.")
@@ -438,6 +439,7 @@ def export_labeling_workbook(
     _write_workbook(
         output_path, selected_rows, purpose=purpose, mode=mode,
         batch_name=batch_name, body_preview_chars=body_preview_chars,
+        guide_path=guide_path,
     )
     return {
         "mode": mode,
