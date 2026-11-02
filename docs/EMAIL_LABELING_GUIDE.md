@@ -1,281 +1,226 @@
-# FRIDAY Email Labeling Guide — Schema v2
+# FRIDAY Email Labeling Guide — v2.1
 
-**Status:** Draft for 20-email pilot  
-**Schema version:** `v2`  
-**Guide version:** `v2.0-draft`  
+**Status:** FROZEN — use this version for blind human ground-truth labeling  
+**Schema version:** `v2.1`  
+**Guide version:** `v2.1`  
 **Applies to:** Blind human labeling of FRIDAY email records  
-**Privacy:** This guide contains synthetic examples only. Real email content and identifiers must remain local.
+**Privacy:** Examples below are invented. Never copy real email content, sender addresses, subjects, or identifiers into committed documentation or reports.
 
-> **Pilot rule:** Label 20 emails using this draft. Review disagreements and confusing cases once, revise the guide once, then freeze the resulting version. Do not change definitions silently after the freeze.
+> **Freeze statement:** The semantic definitions in this guide are frozen as v2.1. Any later semantic change requires a new guide version (v2.2 or later), a changelog entry, and identification and relabeling of every affected row. Do not silently reinterpret existing labels. Only labels personally entered by the human annotator under this guide count as ground truth. AI-generated drafts and legacy labels are not automatically ground truth and are never auto-converted.
 
----
+## 1. Ground-truth principles and decision order
 
-## 1. Purpose and ground-truth principles
+Label what FRIDAY should do with the message, using the full available context. Do not use model predictions, rule outputs, AI suggestions, old labels, sender reputation alone, or subject lines alone as labeling evidence.
 
-Label what the email communicates and what it expects from the recipient—not what a model predicts, what the sender's name suggests, or what the subject line alone implies.
+Apply this order to every email:
 
-1. Make each decision from the available email context. Use the body when available.
-2. Do not use model predictions, rule outputs, previous annotations, or automated suggestions as evidence.
-3. Do not infer a deadline from the received date. A deadline must be stated or clearly established by the email.
-4. Do not guess. Use `unsure=yes` and explain the ambiguity in `note`.
-5. Labels are changed only when the written definitions in this guide justify the change.
-6. Treat the four tasks as distinct judgments. One label must not automatically determine another except where an explicit consistency rule below applies.
+1. **Spam:** Is this junk FRIDAY should hide from the user's useful inbox?
+2. **Needs response/action:** Is a specific request directed at the user, or has the user already started a process that now requires a response, confirmation, decision, verification, or next step?
+3. **Priority:** Is there a real deadline or imminent event within approximately 48 hours that the user would actually act on?
+4. **Category:** Choose the single best topic category from the message body and purpose.
+5. **Unsure:** If evidence is insufficient for any field, mark uncertainty and leave only that field blank.
 
-## 2. Schema v2
+Treat the four task labels as separate decisions. Apply only the explicit consistency checks in Section 5. Never auto-correct labels.
 
-Each email receives these fields:
+## 2. Schema and allowed values
 
-| Field | Allowed values | Meaning |
+| Field | Allowed values | Operational meaning |
 |---|---|---|
-| `is_spam` | `yes`, `no` | Whether the email is unwanted, deceptive, or unsolicited under Section 3. |
-| `needs_response` | `yes`, `no` | Whether a real person or organization is genuinely waiting for a reply, confirmation, decision, or action from you. |
-| `priority` | `URGENT`, `NEEDS_REPLY`, `INFORMATIONAL` | How soon the email requires attention under Section 4. |
-| `category` | `JOB`, `FINANCE`, `PERSONAL`, `PROMOTIONS`, `UPDATES`, `OTHER` | The email's primary topic or purpose. |
-| `unsure` | `yes`, `no` | Whether one or more judgments remain genuinely uncertain. |
-| `note` | Free text; may be blank | Brief explanation of uncertainty or an unusual boundary case. |
+| `is_spam` | `yes`, `no` | Whether FRIDAY should treat the message as junk and hide it. |
+| `needs_response` | `yes`, `no` | Whether a specific request or an already-started process requires a reply, confirmation, decision, verification, or next action from the user. |
+| `priority` | `URGENT`, `NEEDS_REPLY`, `INFORMATIONAL` | How soon the user should attend to the message. |
+| `category` | `JOB`, `FINANCE`, `PROMOTIONS`, `UPDATES`, `OTHER` | The message's primary purpose. |
+| `unsure` | `yes`, `no` | Whether one or more fields cannot be decided confidently. |
+| `note` | Free text; may be blank | Short reason for uncertainty or an unusual boundary case. Use synthetic wording in tests and docs only. |
 
-### 2.1 Required-label and uncertainty policy
+### 2.1 Required labels and uncertainty
 
-For a completed row, all four task labels (`is_spam`, `needs_response`, `priority`, and `category`) must be valid values. `unsure` and `note` are also present as workbook fields.
+- If all four task labels are clear, fill all four and set `unsure=no`; note may be blank.
+- If a field genuinely cannot be determined, set `unsure=yes`, explain the uncertainty in `note`, and leave only that field blank. Do not guess to make the row complete.
+- An incomplete unsure row is not a verified complete annotation.
+- A blank note does not establish who authored a row. Provenance must be established separately; empty-note rows are not automatically human labels.
 
-- If you can confidently label all four tasks, set `unsure=no`; `note` may be blank.
-- If one or more fields cannot be decided from the available evidence, set `unsure=yes`, explain why in `note`, and leave only the genuinely uncertain task field(s) blank.
-- Do not fill an uncertain field merely to make the row importable.
-- A row with an uncertain required task field is intentionally incomplete and will not count as a verified complete label.
-- If the email is malformed, truncated in a way that prevents judgment, or lacks essential context, mark it unsure rather than inventing context.
+## 3. Operational definitions
 
-## 3. Spam (`is_spam`)
+### 3.1 Spam — `is_spam`
 
-### `yes`
+**`yes`** only for junk the user would never want: deceptive or irrelevant unsolicited bulk, phishing, scams, impersonation, malicious links or attachments, and fraudulent requests. The cost of hiding a legitimate recruiter or application email is higher than the cost of showing a newsletter.
 
-Use `yes` when the email is unwanted, deceptive, or unsolicited. This includes phishing, impersonation, malicious links or attachments, scams, and unsolicited bulk messages whose content is irrelevant or deceptive.
+**`no`** for legitimate correspondence, expected notifications, and legitimate marketing, including newsletters the user finds annoying. A subscribed or otherwise legitimate newsletter is not spam. Automation, bulk delivery, unsubscribe links, or annoyance alone do not make a message spam.
 
-### `no`
+FRIDAY should use a promotion score to rank legitimate promotional mail lower; promotion classification must never itself hide the message.
 
-Use `no` for legitimate correspondence, expected service notifications, messages from organizations you use, and marketing from a company or mailing list you signed up for. Automation alone does not make an email spam. Marketing language alone does not make an email spam.
+### 3.2 Needs response/action — `needs_response`
 
-### Decision rule
+**`yes`** when a specific request is directed at the user, or the user has already started a process and the next step is now expected from them. This includes a requested reply, confirmation, interview slot, assessment, verification step, or application step already in progress.
 
-Judge whether the message is unwanted or deceptive independently of its topic. A legitimate subscribed marketing email is `is_spam=no` and normally `category=PROMOTIONS`. A deceptive fake offer is `is_spam=yes`, even if it imitates a promotion or job notice.
+**`no`** for generic invitations and optional calls to action such as “Apply now”, “Shop now”, “Register”, “Explore roles”, or “Connect with us” when the user has not started that process and no specific response/action is expected. Generic promotional prompts do not count as a request directed at the user.
 
-Spam does not automatically mean the message is urgent. Do not let threatening or manipulative wording manufacture urgency. Unless there is a separate, genuine time-sensitive action for you, spam should be `needs_response=no` and `priority=INFORMATIONAL`. If the apparent topic is identifiable, still assign its best-fit category; use `OTHER` only when no category fits.
+Sent mail (the user is the sender) is judged from the user's side. If the user sent the message and is waiting for the other party, `needs_response=no`.
 
-### Synthetic examples
+### 3.3 Priority
 
-| Invented email | `is_spam` | Reason |
-|---|---|---|
-| “You are subscribed to our weekly technology deals. This week's offers are inside.” | `no` | The recipient subscribed; this is legitimate marketing. |
-| “Your bank account will be closed in 10 minutes. Send your password to this unfamiliar address to stop it.” | `yes` | Deceptive credential request and coercive claim. |
+**`URGENT`** only for a real deadline within approximately 48 hours for something the user would actually do (a relevant application, interview, assessment, security code or account action), or an imminent event the user is part of. A one-time code is urgent only while it remains valid, usually 10–15 minutes. A code that has expired or whose validity window is no longer relevant is `INFORMATIONAL` unless another real urgent action exists.
 
-## 4. Response requirement (`needs_response`) and priority
+**`NEEDS_REPLY`** when a reply, confirmation, decision, verification, assessment or already-started application step is expected, but no qualifying urgent deadline or imminent event exists.
 
-These fields are related but are not interchangeable.
+**`INFORMATIONAL`** when no specific response/action is expected and no qualifying urgent matter exists.
 
-### 4.1 `needs_response`
+Contest deadlines, “last chance” language, countdowns, limited-time sales, and “24-hour sale” wording never create `URGENT` by themselves. Priority and needs_response are separate questions: an urgent security action can be `needs_response=no`; a requested interview confirmation can be `needs_response=yes` and `NEEDS_REPLY` if it is not due within about 48 hours.
 
-Use `yes` only when a real person or organization is genuinely waiting for an answer, confirmation, decision, requested information, or an action from you.
+### 3.4 Category
 
-Use `no` when no response or action is expected. The fact that you *could* reply, click, read, or optionally follow up does not make a response necessary.
+Choose one category based on the message body and primary purpose, not merely the sender brand or a templated subject.
 
-Examples:
+- **`JOB`:** A concrete job, internship, PPO, application, recruiter communication, interview, assessment, or offer. A receipt for a job application already submitted is also `JOB`.
+- **`FINANCE`:** Banking, payments, bills, invoices, taxes, financial transactions, financial accounts, broker market news/digests, and financial-service information.
+- **`PROMOTIONS`:** Legitimate marketing, newsletters, sales, discounts, product offers, generic invitations to apply/register/join, contests, courses, career-advice newsletters, and upgrade or feature-use nudges.
+- **`UPDATES`:** Passive status or service information about an existing account, application process, delivery, profile view, rewards update, security notice, or one-time/verification code. Use when the message reports a state/change rather than trying to persuade the user to buy, join, upgrade, or use a feature.
+- **`OTHER`:** Direct human communication or anything that fits none of JOB, FINANCE, PROMOTIONS, or UPDATES. This replaces the former PERSONAL and OTHER distinction.
 
-- “Could you confirm whether you can attend the interview?” → `yes`.
-- “Your account statement is ready to view.” → `no`.
-- “Your parcel is out for delivery.” → `no`.
-- “Please send the missing invoice number.” → `yes`.
+#### Finance newsletter boundary
 
-### 4.2 `priority`
+Choose `FINANCE` for broker or financial-provider market news, market digests, portfolio/account information, and analysis whose primary purpose is to inform about financial markets or the user's finances. Choose `PROMOTIONS` when the primary purpose is to sell, advertise, induce an IPO subscription, open an account, buy a product, upgrade a service, or take up a financial offer. If a market digest contains a secondary product advertisement, classify by the dominant body purpose; if the body is principally an offer, use `PROMOTIONS`.
 
-#### `URGENT`
+## 4. Seven specific rulings
 
-Use when the email establishes a genuinely time-sensitive or high-impact matter requiring prompt attention. Evidence may include an imminent appointment, a stated near-term deadline, an active security or service incident, or a consequential decision due soon.
+Each ruling is mandatory. Examples are invented.
 
-Do not infer urgency from dramatic wording, capital letters, repeated exclamation marks, or the word “urgent” alone. Look for a real deadline, imminent event, or material consequence.
+### Ruling 1 — JOB versus PROMOTIONS
 
-#### `NEEDS_REPLY`
+Use `JOB` only when the message body is about a concrete job/internship/PPO/application or a specific recruitment step. A contest, course, generic “companies are hiring” message, career-advice newsletter, or broad opportunity roundup is `PROMOTIONS` unless it contains a specific role/application relevant to the user.
 
-Use when a response, confirmation, decision, or requested information is expected, but the email does not establish that it needs immediate handling.
+- Example A: “Data Analyst Intern — submit your application for requisition 482 by Friday.” → `JOB`.
+- Example B: “Join our career-growth webinar and discover companies that may hire this year.” → `PROMOTIONS`.
 
-#### `INFORMATIONAL`
+### Ruling 2 — UPDATES versus PROMOTIONS
 
-Use when no response or action is expected and there is no separate urgent matter. The email primarily informs, confirms, or provides material for awareness.
+Passive status information about an existing account, service, or process is `UPDATES`. A nudge to use a feature, join a contest, connect with someone, buy, subscribe, or upgrade is `PROMOTIONS`.
 
-### 4.3 Priority and response consistency
+- Example A: “Your profile was viewed by a recruiter; your reward balance has been updated.” → `UPDATES`.
+- Example B: “Connect with three professionals and enter our networking challenge.” → `PROMOTIONS`.
 
-| `needs_response` | `priority` | Valid? | Explanation |
+### Ruling 3 — Subject/body disagreement
+
+When the subject is templated or misleading and the subject and body disagree, categorize by the body’s actual dominant purpose. Do not let a subject prefix such as “Update” override promotional body content.
+
+- Example A: Subject “Update: application accepted”; body confirms the user's application status and next process state. → `JOB`.
+- Example B: Subject “Account update”; body is primarily an offer to upgrade to a paid plan. → `PROMOTIONS`.
+
+### Ruling 4 — Finance newsletters and broker market digests
+
+Market news, market digests, and financial analysis are `FINANCE`. Sales/IPO nudges and product-acquisition campaigns are `PROMOTIONS`. Classify by the dominant body purpose, not merely by the broker's identity.
+
+- Example A: “Daily market close: index movements, sector performance, and bond yields.” → `FINANCE`.
+- Example B: “Subscribe to this new IPO today; open a premium trading account to access the offer.” → `PROMOTIONS`.
+
+### Ruling 5 — Sent mail
+
+Judge from the user's perspective. If the user sent the message and is waiting for a response from someone else, `needs_response=no`; the other party's expected reply is not an action FRIDAY should ask the user to perform now.
+
+- Example A: The user sent “Could you share the interview feedback?” and is waiting. → `needs_response=no`; normally `INFORMATIONAL` while waiting.
+- Example B: The user sent “I confirm that I will attend the interview.” → `needs_response=no`; the user has already completed their response.
+
+### Ruling 6 — Receipt for an application already submitted
+
+A receipt or confirmation that the user has applied for a job is `JOB`, `needs_response=no`, and `INFORMATIONAL`, unless the body explicitly requests a new step or states a genuine imminent deadline.
+
+- Example A: “You applied for the Software Intern role. We have received your application.” → `JOB`, `no`, `INFORMATIONAL`.
+- Example B: “Your application was submitted successfully; we will contact you if shortlisted.” → `JOB`, `no`, `INFORMATIONAL`.
+
+### Ruling 7 — One-time and verification codes
+
+A self-requested one-time code is `UPDATES`. It is `URGENT` only while the code is valid and the user is actively completing the related sign-in/verification action (typically a 10–15 minute validity window). Otherwise it is `INFORMATIONAL`. Do not infer urgency after expiry.
+
+- Example A: “Your sign-in code is valid for 10 minutes” arrives while the user is signing in. → `UPDATES`, `needs_response=no`, `URGENT`.
+- Example B: A sign-in code notification is reviewed after its validity window has expired and no further action is needed. → `UPDATES`, `needs_response=no`, `INFORMATIONAL`.
+
+## 5. Confusable-pair rules and consistency checks
+
+### 5.1 Spam versus PROMOTIONS
+
+Legitimate newsletters and subscribed marketing are `is_spam=no`, `category=PROMOTIONS`; deceptive, irrelevant unsolicited bulk or scams are `is_spam=yes`. Never mark a legitimate recruiter or job notice as spam merely because it is automated or promotional in tone.
+
+- Example A: A subscribed retailer's weekly discount email → `no`, `PROMOTIONS`.
+- Example B: A fake recruiter message asking for an advance fee → `yes`; categorize by its apparent job-related body only if that remains the best topic, otherwise `OTHER`.
+
+### 5.2 Needs response versus priority
+
+Decide whether a specific user action is expected first, then urgency separately. `URGENT` does not require a reply; `NEEDS_REPLY` does imply a response/action expectation.
+
+- Example A: A security notice says “disable the compromised session now; do not reply.” → `needs_response=no`, `URGENT`.
+- Example B: A recruiter asks the user to select one of three interview slots next week. → `needs_response=yes`, `NEEDS_REPLY`.
+
+### 5.3 UPDATES versus PROMOTIONS
+
+Existing state/status or security information is `UPDATES`; persuasion to buy, join, connect, use a feature, subscribe, or upgrade is `PROMOTIONS`.
+
+- Example A: “Your account recovery email was changed.” → `UPDATES`.
+- Example B: “Try our new account dashboard and unlock premium features.” → `PROMOTIONS`.
+
+### 5.4 PERSONAL/OTHER legacy distinction versus v2.1 OTHER
+
+In v2.1, direct human communication and anything outside the four named topical categories are `OTHER`. Do not create a PERSONAL label. A concrete job-related message remains `JOB` even if it comes from a person.
+
+- Example A: A friend asks whether dinner is still on Saturday. → `OTHER`.
+- Example B: A recruiter sends a specific interview invitation. → `JOB`.
+
+### 5.5 JOB versus UPDATES
+
+A concrete employment opportunity or active recruitment step is `JOB`; passive status about an existing application is still `JOB` under the application-receipt ruling. Generic career content is `PROMOTIONS`.
+
+- Example A: “Your application for the Data Engineer role has moved to interview stage.” → `JOB`.
+- Example B: “Five career tips to improve your profile” newsletter → `PROMOTIONS`.
+
+### 5.6 FINANCE versus UPDATES
+
+Financial information about balances, transactions, bills, statements, market movements, and financial accounts is `FINANCE`. General account/security status unrelated to a financial matter is `UPDATES`.
+
+- Example A: “Your monthly brokerage statement is ready.” → `FINANCE`.
+- Example B: “Your learning-platform password was changed.” → `UPDATES`.
+
+### 5.7 Priority consistency
+
+The following combinations are valid/invalid. The importer may flag invalid combinations, but must never auto-correct them.
+
+| `needs_response` | `priority` | Valid? | Why |
 |---|---|---|---|
-| `yes` | `URGENT` | Yes | A reply/action is expected urgently. |
-| `yes` | `NEEDS_REPLY` | Yes | A reply/action is expected, without immediate urgency. |
-| `yes` | `INFORMATIONAL` | **No** | A required response cannot be merely informational. |
-| `no` | `URGENT` | Yes | Immediate attention/action is needed, but nobody is waiting for a reply. |
-| `no` | `NEEDS_REPLY` | **No** | This priority means a response is expected. |
-| `no` | `INFORMATIONAL` | Yes | No response is expected and no urgent action is established. |
+| `yes` | `URGENT` | Yes | Specific action is expected urgently. |
+| `yes` | `NEEDS_REPLY` | Yes | Specific action is expected, without qualifying urgency. |
+| `yes` | `INFORMATIONAL` | **No** | A specific required action cannot be merely informational. |
+| `no` | `URGENT` | Yes | Prompt action/attention is needed, but no reply is expected. |
+| `no` | `NEEDS_REPLY` | **No** | This priority implies an expected response/action. |
+| `no` | `INFORMATIONAL` | Yes | No specific action or urgent matter exists. |
 
-The importer must flag invalid combinations. It must never silently rewrite one label to make the row consistent.
+- Example A: A requested interview confirmation due in 12 hours → `yes`, `URGENT`.
+- Example B: A passive parcel status notification → `no`, `INFORMATIONAL`.
 
-### Synthetic examples
+## 6. Legacy category mapping (reference only)
 
-| Invented email | `needs_response` | `priority` | Reason |
-|---|---|---|---|
-| “Your technical interview begins in 30 minutes. Please confirm your attendance now.” | `yes` | `URGENT` | A response is expected immediately. |
-| “Could you send the purchase-order reference when convenient?” | `yes` | `NEEDS_REPLY` | A response is expected, but no immediate deadline is stated. |
-| “A security alert reports an active account compromise. Secure your account immediately; no reply is requested.” | `no` | `URGENT` | Prompt action is needed, but no one is waiting for a reply. |
-| “Your monthly statement is available in the account portal.” | `no` | `INFORMATIONAL` | Routine information; no response is expected. |
-
-## 5. Category
-
-Choose exactly one category based on the email's primary purpose. Do not classify solely from sender branding or incidental words.
-
-### `JOB`
-
-Recruitment, job openings, internships, applications, interviews, assessments, offers, recruiter communication, and career opportunities directly related to employment.
-
-### `FINANCE`
-
-Banking, payments, bills, invoices, taxes, card or account statements, financial transactions, and financial-service matters.
-
-### `PERSONAL`
-
-Direct correspondence or arrangements involving friends, family, or personal acquaintances, including personal plans and personal-life updates.
-
-### `PROMOTIONS`
-
-Legitimate marketing, discounts, sales, product offers, advertising, and promotional newsletters. This category is not spam by definition; apply `is_spam` separately.
-
-### `UPDATES`
-
-Service, account, delivery, subscription-status, product/system, and transaction-status notifications whose main purpose is to inform about an existing service or event rather than sell something. Routine receipts and service confirmations generally belong here; financial bills, payments, and statements belong in `FINANCE`.
-
-### `OTHER`
-
-A relevant email that does not fit any of the five categories above after applying the decision rules. Do not use `OTHER` merely because the email is unfamiliar or difficult; use `unsure=yes` when evidence is insufficient.
-
-### Synthetic examples
-
-| Invented email | Category | Reason |
-|---|---|---|
-| “Applications are open for the summer data analyst internship.” | `JOB` | Specific employment opportunity. |
-| “Your electricity bill is due on the 15th.” | `FINANCE` | Bill and payment obligation. |
-| “Are we still meeting for dinner this Saturday?” | `PERSONAL` | Direct personal arrangement. |
-| “Use your subscriber discount for 20% off this weekend.” | `PROMOTIONS` | Sales-oriented offer. |
-| “Your parcel status changed to out for delivery.” | `UPDATES` | Existing delivery status. |
-| “The residents' association has published the minutes of its annual meeting.” | `OTHER` | Relevant, but not one of the defined topic classes. |
-
-## 6. Confusable-pair decision rules
-
-Use the following rules when two labels seem plausible. The examples are invented and are not training data.
-
-### 6.1 Spam vs PROMOTIONS
-
-**Rule:** Legitimate marketing from a company or mailing list the recipient signed up for is `is_spam=no`, `category=PROMOTIONS`; deceptive, unwanted, or unsolicited bulk content is `is_spam=yes`.
-
-| Invented email | Correct interpretation |
+| Legacy category | v2.1 category mapping |
 |---|---|
-| “You opted into our bookstore newsletter. Members receive 15% off this week's releases.” | `is_spam=no`, `category=PROMOTIONS` |
-| “Claim a guaranteed cash prize by entering your bank password on this unfamiliar page.” | `is_spam=yes`; deceptive content, not a legitimate promotion |
+| `JOB` | `JOB` |
+| `FINANCE` | `FINANCE` |
+| `PROMOTIONS` | `PROMOTIONS` |
+| `UPDATES` | `UPDATES` |
+| `PERSONAL` | `OTHER` |
+| `OTHER` | `OTHER` |
 
-### 6.2 `needs_response` vs `priority`
+This table documents the conceptual mapping only. **Legacy labels are not auto-converted or overwritten.** Old labels remain historical data for comparison. Only labels personally entered blind under v2.1 count as new ground truth. AI drafts, including rows marked with `claude_draft:` and rows with unknown provenance, must never be promoted automatically.
 
-**Rule:** `needs_response` asks whether someone is waiting for a reply/action; `priority` asks how urgently the matter needs attention. Do not infer one from the other except for the explicit consistency table in Section 4.3.
+## 7. When unsure
 
-| Invented email | `needs_response` | `priority` |
-|---|---|---|
-| “Please confirm your interview slot by 5 PM today.” | `yes` | `URGENT` |
-| “A critical security alert requires you to reset your password now; this is an automated notice and no reply is requested.” | `no` | `URGENT` |
+- Set `unsure=yes` if the available message context does not support a confident decision.
+- Leave only the genuinely uncertain field(s) blank; fill other fields only when supported.
+- Explain the uncertainty briefly in `note` without copying unnecessary personal content.
+- Do not guess from sender domain, brand, subject prefix, model output, or historical labels.
+- Do not mark unsure merely because a message is automated, unfamiliar, or a newsletter.
 
-### 6.3 UPDATES vs PROMOTIONS
+## 8. Changelog
 
-**Rule:** If the primary purpose is to inform about an existing account, service, delivery, or product change, choose `UPDATES`; if it is to persuade the recipient to buy, subscribe, upgrade, or use an offer, choose `PROMOTIONS`.
+- **v2.1:** Replaced broad legacy interpretations with operational FRIDAY actions; narrowed spam to deceptive/irrelevant junk only; broadened needs_response to specific requests and already-started job-hunt steps; restricted URGENT to real approximately-48-hour deadlines or imminent events; merged PERSONAL into OTHER; clarified JOB/PROMOTIONS, UPDATES/PROMOTIONS, subject/body, finance digest, sent-mail, application receipt, and OTP rules; added explicit legacy mapping and freeze policy.
+- **v2.0-draft:** Earlier pilot draft. Superseded; not frozen ground truth guidance.
 
-| Invented email | Category |
-|---|---|
-| “Your cloud-storage subscription renewed successfully today.” | `UPDATES` |
-| “Upgrade your cloud-storage plan today and save 30%.” | `PROMOTIONS` |
+## 9. Freeze and versioning
 
-### 6.4 PERSONAL vs OTHER
-
-**Rule:** Direct communication involving a recognizable personal relationship or personal arrangement is `PERSONAL`; a relevant message without that relationship and without a better-fitting category is `OTHER`.
-
-| Invented email | Category |
-|---|---|
-| “Hey, are you free to visit us this Sunday? The family would love to see you.” | `PERSONAL` |
-| “The local residents' association has published the public meeting agenda.” | `OTHER` |
-
-### 6.5 JOB vs UPDATES
-
-**Rule:** Choose `JOB` when the main purpose is a specific opening, application, recruitment step, interview, assessment, or offer; choose `UPDATES` for general platform or service activity that only incidentally mentions employment.
-
-| Invented email | Category |
-|---|---|
-| “The recruiter has invited you to the second-round interview for the analyst role.” | `JOB` |
-| “Our careers platform has updated its privacy policy and account settings.” | `UPDATES` |
-
-### 6.6 FINANCE vs UPDATES
-
-**Rule:** Choose `FINANCE` for a bill, payment, invoice, tax, bank/card statement, or financial transaction; choose `UPDATES` for a generic service/account status message not primarily about money.
-
-| Invented email | Category |
-|---|---|
-| “Your credit-card payment of ₹2,400 has been received.” | `FINANCE` |
-| “Your profile settings were saved successfully.” | `UPDATES` |
-
-## 7. Labeling decision order
-
-Apply this sequence to every email:
-
-1. **Read the available context.** Use sender, subject, snippet, and body preview together. Do not rely on the subject alone.
-2. **Decide `is_spam`.** Determine whether the message is unwanted, deceptive, or unsolicited.
-3. **Decide `needs_response`.** Ask whether a real person or organization is genuinely waiting for a reply, confirmation, decision, or action.
-4. **Decide `priority`.** Determine whether attention is urgent, a non-urgent response is expected, or the email is informational. Apply the consistency table.
-5. **Decide `category`.** Choose the single best category for the main purpose.
-6. **Decide `unsure` and write `note`.** Mark uncertainty honestly; do not guess to complete a row.
-
-The order is a workflow aid, not permission to derive one task's label from another. Re-check each task against its own definition.
-
-## 8. When unsure
-
-Mark `unsure=yes` when the available content does not support a confident decision—for example, missing context, ambiguous intent, truncated content, unclear sender relationship, or conflicting signals.
-
-- Leave only the uncertain task field(s) blank.
-- Complete other fields only when their definitions can be applied confidently.
-- Add a short, factual note describing what is missing or ambiguous.
-- Do not use `OTHER` as a substitute for uncertainty.
-- Do not search external sources or contact senders to resolve a label. Label only from the local email data available in the workbook.
-- Do not use model output, rules, or old labels to resolve uncertainty.
-
-## 9. Pilot, one-time refinement, and freeze
-
-### Pilot
-
-1. Create a blind workbook containing 20 emails.
-2. Label those emails using this draft without viewing old labels or model outputs.
-3. Record uncertainty and concise notes where needed.
-4. Review aggregate patterns and the difficult examples after the pilot. Do not change labels merely to improve agreement with old labels or a model.
-
-### One-time refinement
-
-After the 20-email pilot, revise this guide once to resolve demonstrated ambiguities. Document each changed definition or decision rule and why it changed. The pilot labels affected by a changed rule must be reviewed and relabeled under the revised guide.
-
-### Freeze
-
-After that single refinement, mark the guide **FROZEN** and assign a final version (for example, `v2.1`). Use that exact version for all subsequent production labeling and record the guide version with each imported batch.
-
-### Changes after freeze
-
-Any later semantic change requires a new guide version (for example, `v2.2` or `v3.0`, depending on scope), a changelog entry, and an explicit list of affected rows/batches that must be relabeled. Never silently reinterpret existing labels. Cosmetic edits that do not change meaning do not require relabeling but must not alter the frozen decision rules.
-
-## 10. Privacy and handling
-
-- Real email content, sender addresses, subjects, bodies, and email identifiers are private local data. Do not paste them into documentation, issue trackers, public logs, or committed tests.
-- Use synthetic emails only in tests and documentation.
-- Keep labeling workbooks, exports, imports, reports, and manifests in git-ignored private directories.
-- Console output and reports must contain aggregate counts only; never print email content or identifiers.
-- The workbook is a blind labeling surface. It must not expose previous labels, final labels, predictions, rule outputs, LLM outputs, review fields, or label provenance.
-- Full email bodies remain in the local database. A workbook body preview is only for context and is not a replacement for the stored body.
-
-## 11. Version history
-
-| Version | Status | Summary |
-|---|---|---|
-| `v2.0-draft` | Pilot draft | Defines the four-task schema, six categories, uncertainty policy, consistency rules, confusable pairs, and pilot/freeze process. |
-| `v2.1` (reserved) | Final after pilot | One-time refinement based on the 20-email pilot; freeze before production labeling. |
+**v2.1 is frozen.** Do not change these semantics during the v2.1 labeling round. If a genuine semantic correction becomes necessary, create v2.2 (or later), add a dated changelog entry, describe the exact changed rule, identify affected rows/batches, and relabel those affected rows blind. Never retroactively rewrite labels merely because a model prediction disagrees.
