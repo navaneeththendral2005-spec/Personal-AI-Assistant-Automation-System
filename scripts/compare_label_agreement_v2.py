@@ -2,6 +2,12 @@
 
 AI draft rows are refused by default. Use --allow-draft-comparison only for
 diagnostic comparisons; such reports are explicitly NOT_A_SELF_CONSISTENCY_MEASURE.
+
+When the v2 file has a ``labeler`` column (written by scripts.import_labeling_workbook
+and scripts.quarantine_ai_drafts), only ``labeler=human`` rows are ever compared and
+the report says how many other rows were excluded. ``--guide-version`` and
+``--batch-name`` select one annotation round, because the importer deliberately keeps
+several annotations of the same email (different guide versions or batches).
 """
 from __future__ import annotations
 
@@ -12,7 +18,7 @@ import random
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 TASKS: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "is_spam": ("true_is_spam", "is_spam", ("no", "yes")),
@@ -21,6 +27,8 @@ TASKS: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "category": ("true_category", "category", ("JOB", "FINANCE", "PERSONAL", "PROMOTIONS", "UPDATES", "OTHER")),
 }
 DRAFT_PREFIX = "claude_draft:"
+# v2.1 merges the legacy PERSONAL class into OTHER (docs/EMAIL_LABELING_GUIDE.md section 6).
+CATEGORY_V21 = ("JOB", "FINANCE", "PROMOTIONS", "UPDATES", "OTHER")
 
 
 class AgreementError(ValueError):
@@ -167,6 +175,11 @@ def _task_metrics(
         "per_class_agreement": _per_class_agreement(pairs, labels),
         "class_counts_legacy": dict(sorted(Counter(legacy).items())),
         "class_counts_v2": dict(sorted(Counter(v2).items())),
+        # Rows = legacy label, columns = v2 label.
+        "confusion_matrix": {
+            first: {second: sum(a == first and b == second for a, b in pairs) for second in labels}
+            for first in labels
+        },
     }
     if len(labels) == 2:
         pabak = (2 * raw - 1) if raw is not None else None
@@ -182,19 +195,69 @@ def _task_metrics(
     return result
 
 
-def compare_labels(
-    legacy_path: Path,
-    v2_path: Path,
+def _provenance_selection(
+    v2_rows: list[dict[str, str]],
+    *,
+    guide_version: str | None,
+    batch_names: Sequence[str] | None,
+    require_human_provenance: bool,
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """Keep only human rows (when provenance is recorded) and the requested round."""
+    labeler_present = bool(v2_rows) and "labeler" in v2_rows[0]
+    if require_human_provenance and not labeler_present:
+        raise AgreementError(
+            "The v2 file has no 'labeler' column, so who produced each label is unknown. "
+            "Run scripts.quarantine_ai_drafts to declare human vs AI-draft batches first."
+        )
+    selection: dict[str, Any] = {
+        "labeler_column_present": labeler_present,
+        "rows_in_file": len(v2_rows),
+        "rows_by_labeler": dict(sorted(Counter((r.get("labeler") or "(blank)").casefold() for r in v2_rows).items()))
+        if labeler_present else {},
+    }
+    selected = list(v2_rows)
+    if labeler_present:
+        selected = [r for r in selected if (r.get("labeler") or "").strip().casefold() == "human"]
+    selection["excluded_non_human_rows"] = len(v2_rows) - len(selected) if labeler_present else 0
+
+    before_filter = len(selected)
+    if guide_version is not None:
+        if v2_rows and "guide_version" not in v2_rows[0]:
+            raise AgreementError("--guide-version needs a 'guide_version' column in the v2 file.")
+        selected = [r for r in selected if (r.get("guide_version") or "").strip() == guide_version]
+    if batch_names:
+        if v2_rows and "batch_name" not in v2_rows[0]:
+            raise AgreementError("--batch-name needs a 'batch_name' column in the v2 file.")
+        wanted = {name.strip() for name in batch_names}
+        selected = [r for r in selected if (r.get("batch_name") or "").strip() in wanted]
+    selection["excluded_by_filter"] = before_filter - len(selected)
+    selection["guide_versions_in_selection"] = sorted({(r.get("guide_version") or "").strip() for r in selected} - {""})
+    selection["batches_in_selection"] = sorted({(r.get("batch_name") or "").strip() for r in selected} - {""})
+    return selected, selection
+
+
+def compare_label_rows(
+    legacy_rows: list[dict[str, str]],
+    v2_rows: list[dict[str, str]],
     *,
     allow_draft_comparison: bool = False,
     bootstrap_iterations: int = 2000,
     seed: int = 20261101,
+    guide_version: str | None = None,
+    batch_names: Sequence[str] | None = None,
+    require_human_provenance: bool = False,
+    merge_personal_into_other: bool = False,
 ) -> dict[str, Any]:
+    """Compare already-loaded rows. See the module docstring for the provenance rules."""
     if bootstrap_iterations < 100:
         raise AgreementError("bootstrap_iterations must be at least 100.")
-    _, legacy_rows = _read_csv(legacy_path)
-    _, v2_rows = _read_csv(v2_path)
-    draft_found = _has_ai_draft(legacy_rows) or _has_ai_draft(v2_rows)
+    selected_v2, selection = _provenance_selection(
+        v2_rows, guide_version=guide_version, batch_names=batch_names,
+        require_human_provenance=require_human_provenance,
+    )
+    if v2_rows and not selected_v2:
+        raise AgreementError("No v2 annotations remain after the human-provenance and round selection.")
+    draft_found = _has_ai_draft(legacy_rows) or _has_ai_draft(selected_v2)
     if draft_found and not allow_draft_comparison:
         raise AgreementError(
             "AI-draft rows were detected. Refusing comparison; use --allow-draft-comparison "
@@ -208,24 +271,35 @@ def compare_labels(
             if not key:
                 raise AgreementError(f"{label} file contains a blank email_id.")
             if key in indexed:
-                raise AgreementError(f"{label} file contains duplicate email_id values.")
+                hint = (
+                    " Select one annotation round with --guide-version and/or --batch-name."
+                    if label == "v2" else ""
+                )
+                raise AgreementError(f"{label} file contains duplicate email_id values.{hint}")
             indexed[key] = row
         return indexed
 
     legacy = index_rows(legacy_rows, "legacy")
-    v2 = index_rows(v2_rows, "v2")
+    v2 = index_rows(selected_v2, "v2")
     common = sorted(set(legacy) & set(v2))
     if not common:
         raise AgreementError("No matching email IDs were found between the input datasets.")
 
+    def category_value(value: str) -> str:
+        return "OTHER" if merge_personal_into_other and value == "PERSONAL" else value
+
     task_results: dict[str, Any] = {}
     for task, (_, new_column, labels) in TASKS.items():
+        if task == "category" and merge_personal_into_other:
+            labels = CATEGORY_V21
         pairs: list[tuple[str, str]] = []
         unavailable = 0
         excluded_spam = 0
         for key in common:
             old_value = _legacy_value(legacy[key], task)
             new_value = _norm(v2[key].get(new_column), task)
+            if task == "category":
+                old_value, new_value = category_value(old_value), category_value(new_value)
             if task == "priority":
                 if _legacy_value(legacy[key], "is_spam") == "yes" or _norm(v2[key].get("is_spam"), "is_spam") == "yes":
                     excluded_spam += 1
@@ -241,11 +315,18 @@ def compare_labels(
         metrics["unavailable_or_invalid_pairs"] = unavailable
         if task == "priority":
             metrics["excluded_spam_not_applicable"] = excluded_spam
+        if task == "category" and merge_personal_into_other:
+            metrics["category_view"] = "v2.1: legacy PERSONAL merged into OTHER for comparison only; stored labels are unchanged"
         task_results[task] = metrics
 
+    all_human = (not selection["labeler_column_present"]) or all(
+        (r.get("labeler") or "").strip().casefold() == "human" for r in selected_v2
+    )
     return {
         "report_status": "NOT_A_SELF_CONSISTENCY_MEASURE" if draft_found else "HUMAN_ANNOTATION_COMPARISON",
         "ai_draft_rows_detected": draft_found,
+        "provenance_verified": bool(selection["labeler_column_present"] and all_human and not draft_found),
+        "v2_selection": selection,
         "matched_email_count": len(common),
         "legacy_only_count": len(set(legacy) - set(v2)),
         "v2_only_count": len(set(v2) - set(legacy)),
@@ -253,6 +334,30 @@ def compare_labels(
         "privacy_note": "Aggregate statistics only; no email IDs, senders, subjects, or message text.",
         "interpretation_note": "Agreement statistics compare annotations; they do not establish which annotation is correct.",
     }
+
+
+def compare_labels(
+    legacy_path: Path,
+    v2_path: Path,
+    *,
+    allow_draft_comparison: bool = False,
+    bootstrap_iterations: int = 2000,
+    seed: int = 20261101,
+    guide_version: str | None = None,
+    batch_names: Sequence[str] | None = None,
+    require_human_provenance: bool = False,
+    merge_personal_into_other: bool = False,
+) -> dict[str, Any]:
+    _, legacy_rows = _read_csv(legacy_path)
+    _, v2_rows = _read_csv(v2_path)
+    return compare_label_rows(
+        legacy_rows, v2_rows,
+        allow_draft_comparison=allow_draft_comparison,
+        bootstrap_iterations=bootstrap_iterations, seed=seed,
+        guide_version=guide_version, batch_names=batch_names,
+        require_human_provenance=require_human_provenance,
+        merge_personal_into_other=merge_personal_into_other,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -263,6 +368,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-draft-comparison", action="store_true")
     parser.add_argument("--bootstrap-iterations", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=20261101)
+    parser.add_argument("--guide-version", default=None, help="Only compare annotations made under this guide version.")
+    parser.add_argument("--batch-name", action="append", default=None, help="Only compare these batches (repeatable).")
+    parser.add_argument("--require-human-provenance", action="store_true",
+                        help="Refuse unless the v2 file records who labeled each row.")
+    parser.add_argument("--merge-personal-into-other", action="store_true",
+                        help="v2.1 category view: treat legacy PERSONAL as OTHER (comparison only).")
     args = parser.parse_args(argv)
     try:
         report = compare_labels(
@@ -270,6 +381,9 @@ def main(argv: list[str] | None = None) -> int:
             allow_draft_comparison=args.allow_draft_comparison,
             bootstrap_iterations=args.bootstrap_iterations,
             seed=args.seed,
+            guide_version=args.guide_version, batch_names=args.batch_name,
+            require_human_provenance=args.require_human_provenance,
+            merge_personal_into_other=args.merge_personal_into_other,
         )
     except AgreementError as exc:
         print(f"Agreement analysis stopped: {exc}", file=sys.stderr)
@@ -287,7 +401,9 @@ def main(argv: list[str] | None = None) -> int:
         if temp.exists():
             temp.unlink()
     print(f"Report status: {report['report_status']}")
+    print(f"Provenance verified: {report['provenance_verified']}")
     print(f"Matched annotations: {report['matched_email_count']}")
+
     for task, metrics in report["tasks"].items():
         print(
             f"{task}: n={metrics['paired_annotations']}, "
