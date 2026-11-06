@@ -16,7 +16,7 @@ def make_book(
     rows: list[tuple],
     batch: str = "synthetic_batch",
     guide: str = "v2.1",
-    schema: str = "v2",
+    schema: str = "v2.1",
 ) -> None:
     wb = Workbook()
     ws = wb.active
@@ -39,7 +39,7 @@ def valid_row(n: int, email_id: str = "synthetic-1", **overrides) -> tuple:
         "row_number": n, "email_id": email_id, "sender": "person@example.test",
         "subject": "Synthetic subject", "snippet": "Synthetic snippet", "body_preview": "Synthetic body",
         "is_spam": "no", "needs_response": "no", "priority": "INFORMATIONAL",
-        "category": "PERSONAL", "unsure": "no", "note": "synthetic note",
+        "category": "OTHER", "unsure": "no", "note": "synthetic note",
     }
     values.update(overrides)
     return tuple(values[key] for key in ("row_number", "email_id", "sender", "subject", "snippet", "body_preview", "is_spam", "needs_response", "priority", "category", "unsure", "note"))
@@ -168,3 +168,38 @@ def test_wrong_workbook_schema_is_rejected(tmp_path: Path) -> None:
     wb.save(book)
     with pytest.raises(ImportErrorSafe, match="columns"):
         read_workbook(book)
+
+
+def test_v21_rejects_legacy_personal_category_but_v20_draft_preserves_it(tmp_path: Path) -> None:
+    current = tmp_path / "current.xlsx"
+    legacy = tmp_path / "legacy.xlsx"
+    make_book(current, [valid_row(1, "synthetic-current", category="PERSONAL")], guide="v2.1")
+    make_book(legacy, [valid_row(1, "synthetic-legacy", category="PERSONAL")], guide="v2.0-draft")
+    current_records, current_counts = read_workbook(current)
+    legacy_records, legacy_counts = read_workbook(legacy)
+    assert current_records == []
+    assert current_counts["invalid"] == 1
+    assert len(legacy_records) == 1
+    assert legacy_records[0]["category"] == "PERSONAL"
+    assert legacy_counts["accepted"] == 1
+
+
+def test_label_round_is_derived_from_workbook_mode(tmp_path: Path) -> None:
+    book = tmp_path / "test.xlsx"
+    make_book(book, [valid_row(1)], batch="frozen_test_batch")
+    wb = __import__("openpyxl").load_workbook(book)
+    wb["Progress"]["B3"] = "test_v2"
+    wb.save(book)
+    records, _ = read_workbook(book)
+    assert records[0]["label_round"] == "frozen_test"
+
+
+def test_duplicate_with_different_note_is_a_conflict(tmp_path: Path) -> None:
+    book = tmp_path / "note_conflict.xlsx"
+    make_book(book, [
+        valid_row(1, "synthetic-note-conflict", note="first synthetic note"),
+        valid_row(2, "synthetic-note-conflict", note="second synthetic note"),
+    ])
+    records, counts = read_workbook(book)
+    assert records == []
+    assert counts["conflict"] == 1
