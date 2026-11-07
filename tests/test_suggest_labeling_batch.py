@@ -1,108 +1,110 @@
-"""Labeling-queue suggestions: heuristic candidates only, never labels."""
+"""Task-specific minority sampling safety tests; synthetic rows only."""
 import csv
+import json
 
 import pytest
 
-from scripts.label_emails import _load_queue_ids
-from scripts.suggest_labeling_batch import FOCUS_CLASSES, SuggestionError, main, suggest_batch, write_queue
+from scripts.suggest_labeling_batch import (
+    CATEGORY_CLASSES, PRIORITY_CLASSES, SuggestionError, main, suggest_batch, write_queue,
+)
 
 
-def _row(i, sender, subject, body, **truth):
-    row = {"email_id": f"id{i:03d}", "sender": sender, "subject": subject, "snippet": "", "body_text": body, "labels": "INBOX",
-           "true_priority": "", "true_needs_response": "", "true_category": "", "true_is_spam": ""}
-    row.update(truth)
-    return row
+def row(i, sender, subject, body, **truth):
+    item = {
+        "email_id": f"synthetic-{i:03d}", "sender": sender, "subject": subject,
+        "snippet": "", "body_text": body, "labels": "INBOX",
+        "true_priority": "", "true_needs_response": "", "true_category": "", "true_is_spam": "",
+    }
+    item.update(truth)
+    return item
 
 
-@pytest.fixture()
+@pytest.fixture
 def rows():
     data = []
-    for i in range(6):
-        data.append(_row(i, f"Bank <alerts@bank{i}.com>", f"Invoice payment due {i}", "Your invoice payment of Rs. 500 is due. Statement attached."))
-    for i in range(6, 12):
-        data.append(_row(i, f"Friend <friend{i}@gmail.com>", f"Re: dinner {i}?", "Hi Navaneeth, can you confirm? Please let me know."))
-    for i in range(12, 18):
-        data.append(_row(i, f"Deals <news@promo{i}.com>", f"Sale {i}% off", "Limited time discount. Unsubscribe here."))
-    for i in range(18, 22):
-        data.append(_row(i, "x@y.com", "labeled already", "text", true_priority="URGENT", true_is_spam="no", true_needs_response="no", true_category="FINANCE"))
+    for i in range(8):
+        data.append(row(i, f"Bank <alerts{i}@bank{i}.test>", "Invoice payment statement", "Your account statement and payment receipt are available."))
+    for i in range(8, 16):
+        data.append(row(i, f"Friend <friend{i}@mail.test>", "Re: dinner?", "Hi, can you confirm and reply?"))
+    for i in range(16, 24):
+        data.append(row(i, f"Service <notice{i}@service{i}.test>", "Account security update", "Your account security alert and delivery status have changed."))
+    # Existing unrelated labels must not disqualify a task-specific candidate.
+    data.append(row(24, "Friend <a@mail.test>", "Re: request", "Can you confirm?", true_category="PERSONAL", true_is_spam="no"))
+    data.append(row(25, "Service <b@service.test>", "Service update", "Your account status changed.", true_priority="INFORMATIONAL", true_is_spam="no"))
+    data.append(row(26, "Spam <c@spam.test>", "urgent payment", "Urgent payment required.", true_is_spam="yes"))
     return data
 
 
-def test_suggestions_only_come_from_unlabeled_rows(rows):
-    queue, _ = suggest_batch(rows, target_per_class=5, max_per_class=5)
-    labeled = {r["email_id"] for r in rows if r["true_priority"]}
-    assert queue and not ({q["email_id"] for q in queue} & labeled)
-    assert len({q["email_id"] for q in queue}) == len(queue)  # one focus class per email
+def test_task_specific_sampling_includes_partially_labeled_rows(rows):
+    queue, summary = suggest_batch(rows, task="priority", target_per_class=100, max_per_class=100, max_per_domain=100)
+    ids = {item["email_id"] for item in queue}
+    assert "synthetic-024" in ids  # category label does not block priority sampling
+    assert "synthetic-026" not in ids  # spam is never assigned a priority
+    assert set(summary) == {x[0] for x in PRIORITY_CLASSES}
+    assert all(item["focus_task"] == "priority" for item in queue)
 
 
-def test_candidates_match_their_focus_class(rows):
-    queue, _ = suggest_batch(rows, target_per_class=30, max_per_class=3)
-    by_focus = {}
-    for item in queue:
-        by_focus.setdefault(item["focus_class"], []).append(int(item["email_id"][2:]))
-    assert by_focus["FINANCE"] and all(i < 6 for i in by_focus["FINANCE"])
-    assert by_focus["NEEDS_REPLY"] and all(6 <= i < 12 for i in by_focus["NEEDS_REPLY"])
+def test_category_sampling_includes_updates_and_partially_labeled_rows(rows):
+    queue, summary = suggest_batch(rows, task="category", target_per_class=100, max_per_class=100, max_per_domain=100)
+    assert set(summary) == {x[0] for x in CATEGORY_CLASSES}
+    assert set(summary) == {
+    "JOB",
+    "FINANCE",
+    "PROMOTIONS",
+    "UPDATES",
+    "OTHER",
+}
+    assert "PERSONAL" not in summary  # v2.1 merges legacy PERSONAL into OTHER
+    legacy_personal = [item for item in queue if item["email_id"] == "synthetic-024"]
+    assert legacy_personal and legacy_personal[0]["focus_class"] == "OTHER"
+    assert all(item["focus_task"] == "category" for item in queue)
 
 
-def test_request_size_respects_target_cap_and_existing_counts(rows):
-    _, summary = suggest_batch(rows, target_per_class=6, max_per_class=2)
-    assert set(summary) == {focus for focus, _, _ in FOCUS_CLASSES}
-    assert summary["NEEDS_REPLY"]["requested"] == 2
-    assert summary["FINANCE"]["verified_now"] == 4 and summary["FINANCE"]["requested"] == 2
-    assert summary["URGENT"]["verified_now"] == 4
-    _, none_needed = suggest_batch(rows, target_per_class=0)
-    assert all(info["requested"] == 0 and info["suggested"] == 0 for info in none_needed.values())
+def test_frozen_ids_are_never_suggested(rows):
+    frozen = {"synthetic-000", "synthetic-008", "synthetic-016"}
+    queue, _ = suggest_batch(rows, task="priority", frozen_ids=frozen, target_per_class=20, max_per_class=20)
+    assert not (frozen & {item["email_id"] for item in queue})
 
 
-def test_domain_diversity_cap(rows):
-    same_domain = [_row(100 + i, f"Bank <alerts{i}@samebank.com>", "Invoice payment due", "Invoice payment due, statement") for i in range(8)]
-    queue, _ = suggest_batch(same_domain, target_per_class=20, max_per_class=20, max_per_domain=2)
-    assert len([q for q in queue if q["focus_class"] == "FINANCE"]) <= 2
+def test_deterministic_queue_contains_no_message_content(rows, tmp_path):
+    one, _ = suggest_batch(rows, task="category", target_per_class=5)
+    two, _ = suggest_batch(rows, task="category", target_per_class=5)
+    assert one == two
+    path = tmp_path / "queue.csv"
+    write_queue(one, path)
+    content = path.read_text(encoding="utf-8-sig")
+    assert "subject" not in content.lower()
+    assert "statement" not in content.lower()
+    assert "body_text" not in content
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        assert set(csv.DictReader(handle).fieldnames) == {
+            "email_id", "review_reason", "focus_task", "focus_class", "candidate_score"
+        }
 
 
-def test_selection_is_deterministic_and_ignores_prediction_columns(rows):
-    first, _ = suggest_batch(rows, target_per_class=5)
-    noisy = [{**r, "predicted_priority": "URGENT", "rules_category": "JOB", "llm_priority": "SPAM"} for r in rows]
-    second, _ = suggest_batch(noisy, target_per_class=5)
-    assert first == second
-
-
-def test_queue_contains_no_content_and_works_with_the_labeling_tool(rows, tmp_path):
-    queue, _ = suggest_batch(rows, target_per_class=5)
-    out = tmp_path / "queue.csv"
-    write_queue(queue, out)
-    with out.open(encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        assert reader.fieldnames == ["email_id", "review_reason", "focus_class", "candidate_score"]
-        content = out.read_text(encoding="utf-8")
-    for secret in ("Bank", "gmail.com", "Invoice", "Navaneeth"):
-        assert secret not in content
-    assert _load_queue_ids(out) == {q["email_id"] for q in queue}
-
-
-def test_output_is_never_overwritten_without_flag(rows, tmp_path):
-    queue, _ = suggest_batch(rows, target_per_class=5)
-    out = tmp_path / "queue.csv"
-    write_queue(queue, out)
-    before = out.read_bytes()
+def test_write_queue_refuses_overwrite(rows, tmp_path):
+    queue, _ = suggest_batch(rows, task="priority", target_per_class=3)
+    path = tmp_path / "queue.csv"
+    write_queue(queue, path)
+    before = path.read_bytes()
     with pytest.raises(SuggestionError):
-        write_queue(queue[:1], out)
-    assert out.read_bytes() == before
-    write_queue(queue[:1], out, overwrite=True)
-    assert out.read_bytes() != before
+        write_queue(queue, path)
+    assert path.read_bytes() == before
+    backup = write_queue(queue[:1], path, overwrite=True)
+    assert backup is not None and backup.is_file()
+    assert backup.read_bytes() == before
 
 
-def test_cli(rows, tmp_path, capsys):
-    data = tmp_path / "d.csv"
-    with data.open("w", encoding="utf-8", newline="") as handle:
+def test_cli_requires_valid_existing_frozen_manifest(rows, tmp_path, capsys):
+    source = tmp_path / "source.csv"
+    with source.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    out = tmp_path / "q.csv"
-    assert main(["--input", str(data), "--output", str(out), "--target-per-class", "5"]) == 0
-    assert "no labels were assigned" in capsys.readouterr().out
-    assert main(["--input", str(data), "--output", str(out)]) == 2  # exists
-    assert main(["--input", str(tmp_path / "missing.csv"), "--output", str(tmp_path / "x.csv")]) == 2
-    bad = tmp_path / "bad.csv"
-    bad.write_text("a,b\n1,2\n", encoding="utf-8")
-    assert main(["--input", str(bad), "--output", str(tmp_path / "y.csv")]) == 2
+    output = tmp_path / "queue.csv"
+    assert main(["--input", str(source), "--output", str(output), "--split-manifest", str(tmp_path / "missing.json")]) == 2
+    assert not output.exists()
+    manifest = tmp_path / "split.json"
+    manifest.write_text(json.dumps({"version": 1, "tasks": {"priority": {"test_ids": ["synthetic-000"]}}}), encoding="utf-8")
+    assert main(["--input", str(source), "--output", str(output), "--split-manifest", str(manifest), "--task", "priority"]) == 0
+    assert "frozen IDs excluded: 1" in capsys.readouterr().out

@@ -23,7 +23,7 @@ def v2(i, spam="no", resp="no", priority="INFORMATIONAL", category="JOB", *, uns
        guide="v2.1", batch="pilot", labeler="human", note=""):
     return {"email_id": f"e{i}", "is_spam": spam, "needs_response": resp, "priority": priority,
             "category": category, "unsure": unsure, "note": note, "guide_version": guide,
-            "batch_name": batch, "labeler": labeler}
+            "batch_name": batch, "labeler": labeler, "label_round": "blind_relabel"}
 
 
 def dataset(n=40, spam_every=4, resp_every=3, flip_spam=(), flip_resp=()):
@@ -254,3 +254,14 @@ def test_cli_output_has_no_ids_or_notes_and_errors_exit_two(tmp_path, capsys):
     assert run_cli(tmp_path, old, new, "--overwrite") == 2
     assert "labeler" in capsys.readouterr().err
     assert gate_module.main(["--legacy", str(tmp_path / "nope.csv"), "--v2", str(tmp_path / "v2.csv")]) == 2
+
+
+def test_gate_ignores_minority_batches_even_when_they_repeat_email_ids():
+    old, new = dataset()
+    minority = [dict(new[0], batch_name="category_batch1", label_round="minority"),
+                dict(new[0], batch_name="priority_batch2", label_round="minority")]
+    report = evaluate_gate(old, new + minority)
+    assert report["matched_email_count"] == 40
+    assert report["selection"]["label_round_filter"] == "blind_relabel"
+    assert report["selection"]["excluded_by_label_round"] == 2
+    assert report["overall_status"] == "PASS"

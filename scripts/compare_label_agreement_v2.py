@@ -201,6 +201,7 @@ def _provenance_selection(
     guide_version: str | None,
     batch_names: Sequence[str] | None,
     require_human_provenance: bool,
+    label_round: str | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
     """Keep only human rows (when provenance is recorded) and the requested round."""
     labeler_present = bool(v2_rows) and "labeler" in v2_rows[0]
@@ -230,6 +231,13 @@ def _provenance_selection(
             raise AgreementError("--batch-name needs a 'batch_name' column in the v2 file.")
         wanted = {name.strip() for name in batch_names}
         selected = [r for r in selected if (r.get("batch_name") or "").strip() in wanted]
+    before_round_filter = len(selected)
+    if label_round is not None:
+        if v2_rows and "label_round" not in v2_rows[0]:
+            raise AgreementError("--label-round needs a 'label_round' column in the v2 file.")
+        selected = [r for r in selected if (r.get("label_round") or "").strip().casefold() == label_round.casefold()]
+    selection["label_round_filter"] = label_round
+    selection["excluded_by_label_round"] = before_round_filter - len(selected)
     selection["excluded_by_filter"] = before_filter - len(selected)
     selection["guide_versions_in_selection"] = sorted({(r.get("guide_version") or "").strip() for r in selected} - {""})
     selection["batches_in_selection"] = sorted({(r.get("batch_name") or "").strip() for r in selected} - {""})
@@ -247,13 +255,14 @@ def compare_label_rows(
     batch_names: Sequence[str] | None = None,
     require_human_provenance: bool = False,
     merge_personal_into_other: bool = False,
+    label_round: str | None = None,
 ) -> dict[str, Any]:
     """Compare already-loaded rows. See the module docstring for the provenance rules."""
     if bootstrap_iterations < 100:
         raise AgreementError("bootstrap_iterations must be at least 100.")
     selected_v2, selection = _provenance_selection(
         v2_rows, guide_version=guide_version, batch_names=batch_names,
-        require_human_provenance=require_human_provenance,
+        require_human_provenance=require_human_provenance, label_round=label_round,
     )
     if v2_rows and not selected_v2:
         raise AgreementError("No v2 annotations remain after the human-provenance and round selection.")
@@ -347,6 +356,7 @@ def compare_labels(
     batch_names: Sequence[str] | None = None,
     require_human_provenance: bool = False,
     merge_personal_into_other: bool = False,
+    label_round: str | None = None,
 ) -> dict[str, Any]:
     _, legacy_rows = _read_csv(legacy_path)
     _, v2_rows = _read_csv(v2_path)
@@ -356,7 +366,7 @@ def compare_labels(
         bootstrap_iterations=bootstrap_iterations, seed=seed,
         guide_version=guide_version, batch_names=batch_names,
         require_human_provenance=require_human_provenance,
-        merge_personal_into_other=merge_personal_into_other,
+        merge_personal_into_other=merge_personal_into_other, label_round=label_round,
     )
 
 
@@ -370,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=20261101)
     parser.add_argument("--guide-version", default=None, help="Only compare annotations made under this guide version.")
     parser.add_argument("--batch-name", action="append", default=None, help="Only compare these batches (repeatable).")
+    parser.add_argument("--label-round", default=None, help="Only compare this annotation round, e.g. blind_relabel.")
     parser.add_argument("--require-human-provenance", action="store_true",
                         help="Refuse unless the v2 file records who labeled each row.")
     parser.add_argument("--merge-personal-into-other", action="store_true",
@@ -383,7 +394,7 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             guide_version=args.guide_version, batch_names=args.batch_name,
             require_human_provenance=args.require_human_provenance,
-            merge_personal_into_other=args.merge_personal_into_other,
+            merge_personal_into_other=args.merge_personal_into_other, label_round=args.label_round,
         )
     except AgreementError as exc:
         print(f"Agreement analysis stopped: {exc}", file=sys.stderr)

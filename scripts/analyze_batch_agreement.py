@@ -201,8 +201,18 @@ def score_pair(
 
 def analyze(path: Path) -> tuple[dict[str, Any], list[dict[str, str]]]:
     rows, guides = read_annotations(path)
+    # Minority batches are targeted additions, not blind relabels. Comparing them
+    # against each other (or against a blind pilot) would misrepresent task sampling
+    # as inter-rater/self-consistency agreement. Older ledgers without label_round
+    # retain the historical behavior.
+    has_round = any((row.get("label_round") or "").strip() for row in rows)
+    agreement_rows = [
+        row for row in rows
+        if not has_round or (row.get("label_round") or "").strip().casefold() == "blind_relabel"
+    ]
+    excluded_non_relabel_rows = len(rows) - len(agreement_rows)
     by_batch: dict[str, dict[str, dict[str, str]]] = {}
-    for row in rows:
+    for row in agreement_rows:
         by_batch.setdefault(row["batch_name"].strip(), {})[row["email_id"].strip()] = row
 
     pairs = []
@@ -228,7 +238,9 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[dict[str, str]]]:
         "report_version": "1.0",
         "method": "Pairwise unweighted Cohen's kappa, raw agreement, and confusion matrices",
         "annotation_rows": len(rows),
-        "unique_emails": len({row["email_id"].strip() for row in rows}),
+        "agreement_annotation_rows": len(agreement_rows),
+        "excluded_non_blind_relabel_rows": excluded_non_relabel_rows,
+        "unique_emails": len({row["email_id"].strip() for row in agreement_rows}),
         "batches": [
             {"batch_name": name, "guide_version": guides[name], "annotation_count": len(by_batch[name])}
             for name in sorted(by_batch)
@@ -236,6 +248,8 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[dict[str, str]]]:
         "batch_pairs_with_overlap": len(pairs),
         "pairs": pairs,
         "interpretation_note": (
+            "Only blind_relabel batches are compared when label_round provenance is available; "
+            "minority batches are excluded because they are targeted additions, not agreement samples. "
             "Cross-version comparisons are not same-guide self-consistency. Small overlap counts "
             "are descriptive and should not be overinterpreted. Confident-only results exclude "
             "a pair if either annotation has unsure=yes. Priority comparisons are excluded if "

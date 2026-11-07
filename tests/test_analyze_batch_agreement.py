@@ -10,7 +10,7 @@ from scripts.analyze_batch_agreement import analyze, cohen_kappa, write_reports
 
 FIELDS = [
     "email_id", "batch_name", "guide_version", "is_spam",
-    "needs_response", "priority", "category", "unsure", "note",
+    "needs_response", "priority", "category", "unsure", "note", "label_round",
 ]
 
 
@@ -144,3 +144,25 @@ def test_write_refuses_overwrite_then_backs_up(tmp_path):
     write_reports({"ok": True}, [], output, matrix, overwrite=True, backup_dir=backup)
     assert json.loads(output.read_text()) == {"ok": True}
     assert len(list(backup.iterdir())) == 2
+
+
+def test_minority_batches_are_excluded_from_agreement_pairs(tmp_path):
+    source = tmp_path / "labels.csv"
+    rows = [
+        row("shared-1", "blind_a", "v2.1"),
+        row("shared-1", "blind_b", "v2.1"),
+        row("shared-1", "category_batch1", "v2.1", category="JOB"),
+        row("shared-1", "priority_batch2", "v2.1", category="FINANCE"),
+    ]
+    for item in rows[:2]:
+        item["label_round"] = "blind_relabel"
+    for item in rows[2:]:
+        item["label_round"] = "minority"
+    write_csv(source, rows)
+    report, _ = analyze(source)
+    assert report["annotation_rows"] == 4
+    assert report["agreement_annotation_rows"] == 2
+    assert report["excluded_non_blind_relabel_rows"] == 2
+    assert report["batch_pairs_with_overlap"] == 1
+    assert report["pairs"][0]["batch_a"] == "blind_a"
+    assert report["pairs"][0]["batch_b"] == "blind_b"

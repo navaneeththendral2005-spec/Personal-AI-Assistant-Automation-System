@@ -204,9 +204,65 @@ def _select_ids(
         candidates = [email_id for email_id, row in by_id.items() if _is_previously_verified(row)]
         purpose = "BLIND RELABEL — old labels are hidden; do not consult previous annotations."
     elif mode == "minority":
-        queued = _read_queue_ids(queue_path)
-        candidates = [email_id for email_id in queued if email_id in by_id and not has_any_human_label(by_id[email_id])]
-        purpose = "MINORITY CLASS CANDIDATES — heuristic queue membership is not a label."
+        # The queue is task-specific. A label on an unrelated task must not
+        # disqualify an email, but a pre-existing label for the target task must.
+        queued_rows: dict[str, dict[str, str]] = {}
+        try:
+            with queue_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                if not reader.fieldnames or "email_id" not in reader.fieldnames:
+                    raise WorkbookExportError("Minority labeling queue is missing its email_id column.")
+                for item in reader:
+                    email_id = (item.get("email_id") or "").strip()
+                    if email_id:
+                        queued_rows[email_id] = {k: (v or "").strip() for k, v in item.items() if k}
+        except (OSError, csv.Error) as exc:
+            raise WorkbookExportError("Minority labeling queue is missing or invalid.") from exc
+        frozen = _read_frozen_ids(split_manifest)
+        candidates = []
+        focus_tasks = {item.get("focus_task", "") for item in queued_rows.values() if item.get("focus_task")}
+        if len(focus_tasks) > 1:
+            raise WorkbookExportError("A minority queue must contain candidates for exactly one task.")
+        focus_task = next(iter(focus_tasks), "")
+        if focus_task and any(not item.get("focus_task") or not item.get("focus_class") for item in queued_rows.values()):
+            raise WorkbookExportError("Every task-specific queue row must include focus_task and focus_class.")
+        allowed_focus = {
+            "priority": {"URGENT", "NEEDS_REPLY"},
+                "category": {
+                    "JOB",
+                    "FINANCE",
+                    "PROMOTIONS",
+                    "UPDATES",
+                    "OTHER",
+                },
+            }
+        if focus_task and focus_task not in allowed_focus:
+            raise WorkbookExportError("Minority queue contains an unsupported focus task.")
+        if focus_task and any(item.get("focus_class", "").upper() not in allowed_focus[focus_task] for item in queued_rows.values()):
+            raise WorkbookExportError("Minority queue contains a focus class that does not belong to its task.")
+        for email_id, item in queued_rows.items():
+            row = by_id.get(email_id)
+            if row is None or email_id in frozen:
+                continue
+            if focus_task == "priority":
+                if (row.get("true_is_spam") or "").strip().lower() == "yes":
+                    continue
+                if (row.get("true_priority") or "").strip():
+                    continue
+            elif focus_task == "category":
+                current_category = (row.get("true_category") or "").strip().upper()
+                focus_class = item.get("focus_class", "").strip().upper()
+                if current_category and not (current_category == "PERSONAL" and focus_class == "OTHER"):
+                    continue
+            elif has_any_human_label(row):
+                # Backward compatibility for older queues without task metadata.
+                continue
+            candidates.append(email_id)
+        purpose = (
+            f"MINORITY {focus_task.upper()} CANDIDATES — heuristic queue membership is not a label."
+            if focus_task else
+            "MINORITY CLASS CANDIDATES — legacy queue; heuristic membership is not a label."
+        )
     elif mode == "test_v2":
         candidates, _ = _test_v2_ids(rows, split_manifest=split_manifest, test_manifest=test_manifest, seed=seed)
         purpose = "TEST — frozen blind holdout. Never use these labels for training, tuning, or model selection."
@@ -313,7 +369,7 @@ def _write_workbook(
     lists.sheet_state = "hidden"
     _add_defined_name(wb, "YesNo", "Lists", "$A$2:$A$3")
     _add_defined_name(wb, "PriorityValues", "Lists", "$B$2:$B$4")
-    _add_defined_name(wb, "CategoryValues", "Lists", "$C$2:$C$7")
+    _add_defined_name(wb, "CategoryValues", "Lists", f"$C$2:$C${len(CATEGORIES) + 1}")
 
     dropdowns = (("G", "=YesNo"), ("H", "=YesNo"), ("I", "=PriorityValues"),
                  ("J", "=CategoryValues"), ("K", "=YesNo"))

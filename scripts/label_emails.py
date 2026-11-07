@@ -10,7 +10,9 @@ YES_NO = ("yes", "no")
 PRIORITIES = ("URGENT", "NEEDS_REPLY", "INFORMATIONAL")
 LEGACY_PRIORITIES = (*PRIORITIES, "SPAM")
 NEEDS_RESPONSE = YES_NO
-CATEGORIES = ("JOB", "FINANCE", "PERSONAL", "PROMOTIONS", "UPDATES", "OTHER")
+# v2.1 has five categories: legacy PERSONAL is reviewed as OTHER.
+CATEGORIES = ("JOB", "FINANCE", "PROMOTIONS", "UPDATES", "OTHER")
+LEGACY_CATEGORIES = (*CATEGORIES, "PERSONAL")
 LABEL_FIELDS = ("true_is_spam", "true_priority", "true_needs_response", "true_category")
 LEGACY_LABEL_FIELDS = ("true_priority", "true_needs_response", "true_category")
 
@@ -103,7 +105,7 @@ def _legacy_fully_labeled(row: dict[str, str]) -> bool:
     return (
         (row.get("true_priority") or "").strip() in LEGACY_PRIORITIES
         and (row.get("true_needs_response") or "").strip() in NEEDS_RESPONSE
-        and (row.get("true_category") or "").strip() in CATEGORIES
+        and (row.get("true_category") or "").strip() in LEGACY_CATEGORIES
     )
 
 def _load_queue_ids(queue_path: Path) -> set[str]:
@@ -193,7 +195,7 @@ def label_dataset(
             fields_to_label = (
                 ("true_priority", LEGACY_PRIORITIES),
                 ("true_needs_response", NEEDS_RESPONSE),
-                ("true_category", CATEGORIES),
+                ("true_category", LEGACY_CATEGORIES),
             )
         else:
             print("Decision order: 1) spam? 2) if not spam, priority; 3) needs response; 4) category. Spam and priority are separate labels.", file=output)

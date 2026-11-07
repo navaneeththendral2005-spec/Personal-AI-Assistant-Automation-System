@@ -90,7 +90,8 @@ def evaluate_gate(
     merge = guide_version.startswith("v2.1")
     common = dict(
         guide_version=guide_version, batch_names=batch_names, require_human_provenance=True,
-        merge_personal_into_other=merge, bootstrap_iterations=bootstrap_iterations, seed=seed,
+        merge_personal_into_other=merge, label_round="blind_relabel",
+        bootstrap_iterations=bootstrap_iterations, seed=seed,
     )
     try:
         primary = compare_label_rows(legacy_rows, v2_rows, **common)
@@ -149,6 +150,7 @@ def evaluate_gate(
         1 for r in v2_rows
         if (r.get("labeler") or "").strip().casefold() == "human"
         and (r.get("guide_version") or "").strip() == guide_version
+        and (r.get("label_round") or "").strip().casefold() == "blind_relabel"
         and (r.get("unsure") or "").strip().casefold() == "yes"
     )
     return {
@@ -160,7 +162,8 @@ def evaluate_gate(
             "kappa_threshold": threshold,
             "minimum_paired_annotations": min_pairs,
             "guide_version": guide_version,
-            "ground_truth": "Only labeler=human rows under this guide version count; AI drafts and unknown provenance are excluded.",
+            "ground_truth": "Only labeler=human blind_relabel rows under this guide version count; minority batches, AI drafts, and unknown provenance are excluded.",
+        "label_round": "blind_relabel",
         },
         "gated_tasks": verdicts,
         "informational_tasks_not_gating": informational,

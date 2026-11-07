@@ -34,3 +34,12 @@ Notable changes to FRIDAY are documented here. This changelog summarizes the pro
 ## Evaluation Notes
 
 Historical test counts in earlier development documents refer to different snapshots and should not be treated as the current test result. Run `python -m pytest -q` against the current checkout to verify the latest status.
+
+## Unreleased — Phase 3 adapter foundation
+
+- Added an isolated local Ollama classification adapter with strict output validation,
+  bounded email input, typed timeout/unavailable/output failures, and deterministic
+  rules fallback provenance.
+- Added synthetic offline tests and documented configuration/verification.
+- Existing production email analysis remains rules-only pending Phase 4 benchmarking
+  and Phase 5 integration.

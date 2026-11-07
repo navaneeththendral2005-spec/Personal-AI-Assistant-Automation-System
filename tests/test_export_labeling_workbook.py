@@ -87,6 +87,10 @@ def test_blind_workbook_has_only_allowed_columns_and_hides_old_labels(tmp_path: 
     for col in range(7, 13):
         assert sheet.cell(2, col).protection.locked is False
     assert len(sheet.data_validations.dataValidation) == 5
+    category_values = [load_workbook(output_dir / "blind.xlsx")["Lists"].cell(r, 3).value for r in range(2, 7)]
+    assert category_values == ["JOB", "FINANCE", "PROMOTIONS", "UPDATES", "OTHER"]
+    assert "PERSONAL" not in category_values
+    assert "$C$2:$C$6" in str(load_workbook(output_dir / "blind.xlsx").defined_names["CategoryValues"].attr_text)
     assert sheet.freeze_panes == "C2"
     assert sheet.auto_filter.ref.startswith("A1:L")
     assert len(sheet.conditional_formatting) >= 2
@@ -148,10 +152,27 @@ def test_random_mode_requires_count_and_only_selects_unlabeled(tmp_path: Path) -
 def test_minority_mode_uses_queue_ids_without_exposing_queue_metadata(tmp_path: Path) -> None:
     source = tmp_path / "source.csv"
     write_source(source, make_rows(4))
+    # The task-specific queue may contain rows with labels for other tasks,
+    # but frozen test IDs and rows already labeled for the target task are excluded.
+    rows = make_rows(4)
+    rows[0]["true_category"] = "PERSONAL"  # unrelated label; still eligible for priority
+    rows[1]["true_priority"] = "URGENT"   # target already labeled; not eligible
+    rows[2]["true_priority"] = "INFORMATIONAL"
+    source = tmp_path / "source.csv"
+    write_source(source, rows)
     queue = tmp_path / "queue.csv"
-    queue.write_text("email_id,focus_class,score\nmessage-001,FINANCE,9.2\nmessage-003,OTHER,7.1\n", encoding="utf-8")
+    queue.write_text(
+        "email_id,review_reason,focus_task,focus_class,candidate_score\n"
+        "message-000,candidate,priority,URGENT,9.2\n"
+        "message-001,candidate,priority,NEEDS_REPLY,8.1\n"
+        "message-003,candidate,priority,URGENT,7.1\n",
+        encoding="utf-8",
+    )
+    split = tmp_path / "split.json"
+    write_split(split)
     out = tmp_path / "labeling"
-    export_labeling_workbook(source, mode="minority", batch_name="minority", output_dir=out, queue_path=queue)
+    export_labeling_workbook(source, mode="minority", batch_name="minority", output_dir=out,
+                             queue_path=queue, split_manifest=split)
     sheet = load_workbook(out / "minority.xlsx")["Labeling"]
     assert sheet.max_row == 3
     assert "focus_class" not in [cell.value for cell in sheet[1]]
