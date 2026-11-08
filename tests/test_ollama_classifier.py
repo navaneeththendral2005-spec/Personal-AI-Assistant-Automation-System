@@ -28,8 +28,9 @@ class FakeResponse:
     def __exit__(self, *args):
         return False
 
-    def read(self):
-        return json.dumps(self.payload).encode("utf-8")
+    def read(self, size=-1):
+        data = json.dumps(self.payload).encode("utf-8")
+        return data if size < 0 else data[:size]
 
 
 def config():
@@ -126,6 +127,7 @@ def test_fallback_is_deterministic_and_does_not_expose_exception_text():
 @pytest.mark.parametrize("bad_config", [
     OllamaConfig(timeout_seconds=0),
     OllamaConfig(max_body_chars=-1),
+    OllamaConfig(max_response_bytes=100),
     OllamaConfig(num_ctx=100),
     OllamaConfig(temperature=3),
     OllamaConfig(host="file:///tmp"),
@@ -133,3 +135,28 @@ def test_fallback_is_deterministic_and_does_not_expose_exception_text():
 def test_invalid_configuration_is_rejected(bad_config):
     with pytest.raises(ValueError):
         classify_with_ollama({}, bad_config)
+
+
+def test_oversized_response_is_rejected_before_json_parsing():
+    class OversizedResponse(FakeResponse):
+        def read(self, size=-1):
+            return b"x" * (size + 1)
+
+    small_limit = OllamaConfig(
+        host="http://localhost:11434", model="synthetic-model", max_response_bytes=1024
+    )
+    with pytest.raises(OllamaOutputError, match="size limit"):
+        classify_with_ollama({}, small_limit, opener=lambda request, timeout: OversizedResponse({}))
+
+
+def test_response_limit_is_passed_to_stream_read():
+    class ReadLimitResponse(FakeResponse):
+        requested_size = None
+
+        def read(self, size=-1):
+            self.requested_size = size
+            return super().read(size)
+
+    response = ReadLimitResponse(valid_payload())
+    classify_with_ollama({}, config(), opener=lambda request, timeout: response)
+    assert response.requested_size == config().max_response_bytes + 1

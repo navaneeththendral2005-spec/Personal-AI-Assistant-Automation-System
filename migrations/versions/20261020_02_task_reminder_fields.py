@@ -24,8 +24,11 @@ def upgrade() -> None:
     )
     op.create_index("ix_tasks_reminder_sent", "tasks", ["reminder_sent"], unique=False)
     op.execute("UPDATE tasks SET updated_at = created_at WHERE updated_at IS NULL")
-    op.alter_column("tasks", "updated_at", nullable=False)
-    op.alter_column("tasks", "reminder_sent", server_default=None)
+    # Batch mode keeps this revision portable to SQLite (used by isolated
+    # integration tests) while retaining native ALTER COLUMN on PostgreSQL.
+    with op.batch_alter_table("tasks") as batch_op:
+        batch_op.alter_column("updated_at", nullable=False)
+        batch_op.alter_column("reminder_sent", server_default=None)
 
 
 def downgrade() -> None:

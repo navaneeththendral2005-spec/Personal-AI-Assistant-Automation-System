@@ -19,7 +19,7 @@ class Email:
 
 
 def rules(confidence=90):
-    return {"category": "OTHER", "priority": "NORMAL", "confidence_score": confidence, "classification_reason": "synthetic"}
+    return {"category": "OTHER", "priority": "NORMAL", "priority_confidence_score": confidence, "confidence_score": confidence, "classification_reason": "synthetic"}
 
 
 def suggestion():
@@ -28,8 +28,29 @@ def suggestion():
 
 def test_confident_rules_skip_ollama():
     calls = []
-    result = classify_hybrid(Email(), rules_classifier=lambda _: rules(90), ollama_classifier=lambda *a: calls.append(a))
+    result = classify_hybrid(
+        Email(),
+        config=HybridConfig(enabled=True, confidence_threshold=70),
+        rules_classifier=lambda _: rules(90),
+        ollama_classifier=lambda *a: pytest.fail("Ollama must not run for confident priority rules"),
+    )
     assert result.route == "rules_confident" and result.model_suggestion is None and calls == []
+
+
+
+def test_priority_confidence_controls_routing_not_aggregate_confidence():
+    # Aggregate confidence can be high while the priority decision is uncertain.
+    result = classify_hybrid(
+        Email(),
+        rules_classifier=lambda _: {
+            **rules(90),
+            "priority_confidence_score": 40,
+        },
+        ollama_classifier=lambda *a: suggestion(),
+    )
+    assert result.route == "rules_plus_ollama_advisory"
+    assert result.rules_confidence == 40
+
 
 
 def test_low_confidence_gets_advisory_without_overwriting_rules():

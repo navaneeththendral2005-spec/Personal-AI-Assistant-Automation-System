@@ -36,6 +36,7 @@ class OllamaConfig:
     model: str = "qwen3:4b"
     timeout_seconds: float = 45.0
     max_body_chars: int = 1200
+    max_response_bytes: int = 65536
     num_ctx: int = 2048
     temperature: float = 0.0
 
@@ -46,6 +47,7 @@ class OllamaConfig:
             model=os.getenv("OLLAMA_MODEL", "qwen3:4b"),
             timeout_seconds=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "45")),
             max_body_chars=int(os.getenv("OLLAMA_MAX_BODY_CHARS", "1200")),
+            max_response_bytes=int(os.getenv("OLLAMA_MAX_RESPONSE_BYTES", "65536")),
             num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "2048")),
             temperature=float(os.getenv("OLLAMA_TEMPERATURE", "0")),
         )
@@ -57,9 +59,13 @@ class OllamaConfig:
             raise ValueError("Ollama model name cannot be blank")
         if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("Ollama timeout must be a positive finite number")
-        if self.max_body_chars < 0 or self.num_ctx < 256:
-            raise ValueError("Invalid Ollama input/context limits")
-        if not 0 <= self.temperature <= 2:
+        if isinstance(self.max_body_chars, bool) or not isinstance(self.max_body_chars, int) or self.max_body_chars < 0:
+            raise ValueError("OLLAMA_MAX_BODY_CHARS must be a non-negative integer")
+        if isinstance(self.max_response_bytes, bool) or not isinstance(self.max_response_bytes, int) or self.max_response_bytes < 1024:
+            raise ValueError("OLLAMA_MAX_RESPONSE_BYTES must be an integer of at least 1024")
+        if isinstance(self.num_ctx, bool) or not isinstance(self.num_ctx, int) or self.num_ctx < 256:
+            raise ValueError("OLLAMA_NUM_CTX must be an integer of at least 256")
+        if isinstance(self.temperature, bool) or not isinstance(self.temperature, (int, float)) or not math.isfinite(float(self.temperature)) or not 0 <= self.temperature <= 2:
             raise ValueError("Ollama temperature must be between 0 and 2")
 
 
@@ -172,7 +178,12 @@ def classify_with_ollama(
     started = time.perf_counter()
     try:
         with opener(request, timeout=config.timeout_seconds) as response:
-            response_data = json.loads(response.read().decode("utf-8"))
+            raw_response = response.read(config.max_response_bytes + 1)
+            if len(raw_response) > config.max_response_bytes:
+                raise OllamaOutputError("Ollama response exceeded the configured size limit")
+            response_data = json.loads(raw_response.decode("utf-8"))
+    except OllamaOutputError:
+        raise
     except (TimeoutError, urllib.error.URLError) as exc:
         if isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError):
             raise OllamaTimeoutError("Ollama inference timed out") from None

@@ -7,14 +7,15 @@ import logging
 from datetime import datetime, timezone
 from threading import Lock
 
-from apscheduler.schedulers.background import BackgroundScheduler
+from typing import Any
+
 from sqlalchemy import select
 
 from backend.database import SessionLocal
 from backend.models import Task
 
 logger = logging.getLogger("friday.reminders")
-_scheduler: BackgroundScheduler | None = None
+_scheduler: Any | None = None
 _scheduler_lock = Lock()
 
 
@@ -40,7 +41,8 @@ def check_due_reminders() -> int:
         )
         for task in due_tasks:
             # Console logging is the initial notification channel.
-            logger.warning("FRIDAY REMINDER | task_id=%s | title=%s | due_at=%s", task.id, task.title, task.due_at)
+            # Task titles may originate from private email content; keep logs metadata-only.
+            logger.warning("FRIDAY REMINDER | task_id=%s | due_at=%s", task.id, task.due_at)
             task.reminder_sent = True
             task.updated_at = now
             sent_count += 1
@@ -57,6 +59,10 @@ def check_due_reminders() -> int:
 
 def start_reminder_scheduler() -> None:
     global _scheduler
+    # Import the optional scheduler only when starting it. This keeps the
+    # reminder query service importable in migration/test/offline contexts.
+    from apscheduler.schedulers.background import BackgroundScheduler
+
     with _scheduler_lock:
         if _scheduler is not None and _scheduler.running:
             return

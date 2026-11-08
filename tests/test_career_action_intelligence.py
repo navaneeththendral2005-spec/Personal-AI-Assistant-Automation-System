@@ -60,6 +60,9 @@ def test_analysis_persists_and_filters_career_evidence():
         session.commit()
         result = analyze_stored_emails(session)
         assert result["created"] == 2
+        # Priority-specific routing confidence is transient and not persisted as a DB column.
+        from backend.models_email_intelligence import EmailAnalysis
+        assert "priority_confidence_score" not in EmailAnalysis.__table__.columns
         filtered = list_analyzed_emails(session, career_only=True)
         assert filtered["count"] == 1
         item = filtered["emails"][0]
@@ -68,6 +71,41 @@ def test_analysis_persists_and_filters_career_evidence():
         assert item["career_evidence"]
         assert item["action_evidence"] == []
         assert list_analyzed_emails(session, has_deadline=True)["count"] == 0
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_hybrid_preview_is_advisory_and_does_not_persist(monkeypatch):
+    from backend.services import email_intelligence_service as service
+    from backend.services.hybrid_router import HybridResult
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, autoflush=False, autocommit=False)()
+    try:
+        email = EmailMessage(
+            gmail_message_id="preview-only", thread_id="preview-thread", sender="person@example.test",
+            recipient="me@example.test", subject="Synthetic preview", message_date=datetime.now(timezone.utc),
+            snippet="Synthetic message", labels=["INBOX"],
+        )
+        session.add(email)
+        session.commit()
+
+        monkeypatch.setattr(service, "classify_hybrid", lambda *args, **kwargs: HybridResult(
+            rules_result={"priority": "NORMAL", "priority_confidence_score": 45},
+            model_suggestion={"priority": "NEEDS_REPLY", "confidence": 0.8},
+            route="rules_plus_ollama_advisory", fallback_reason=None,
+            rules_confidence=45, confidence_threshold=70,
+        ))
+        preview = service.preview_hybrid_classification(session, email.id)
+        assert preview["persistence"] == "none"
+        assert preview["rules_result"]["priority"] == "NORMAL"
+        assert preview["model_suggestion"]["priority"] == "NEEDS_REPLY"
+        assert "different" in preview["priority_semantics"]["warning"]
+        assert session.query(service.EmailAnalysis).count() == 0
+        assert service.preview_hybrid_classification(session, 99999) is None
     finally:
         session.close()
         Base.metadata.drop_all(engine)

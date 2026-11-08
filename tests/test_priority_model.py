@@ -143,3 +143,22 @@ def test_default_metadata_weight_is_documented_constant():
     pipeline = build_pipeline(variant="text_plus_metadata")
     weight = pipeline.named_steps["features"].transformer_list[1][1].named_steps["weight"]
     assert weight.weight == DEFAULT_METADATA_WEIGHT
+
+
+def test_word_character_variant_and_tunable_logistic_regression_parameters():
+    rows, labels = _dataset(42)
+    model = train_model(
+        rows, labels, keys=_keys(rows), frozen_test_ids=set(),
+        variant="text_word_char", c=0.5, class_weight=None,
+    )
+    assert len(model.predict(rows[:5])) == 5
+    classifier = model.pipeline.named_steps["classifier"]
+    assert classifier.C == 0.5
+    assert classifier.class_weight is None
+
+
+def test_metadata_pipeline_honours_logistic_regression_parameters():
+    pipeline = build_pipeline(variant="text_plus_metadata", c=0.25, class_weight=None)
+    classifier = pipeline.named_steps["classifier"]
+    assert classifier.C == 0.25
+    assert classifier.class_weight is None

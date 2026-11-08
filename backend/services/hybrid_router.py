@@ -71,11 +71,13 @@ class HybridResult:
         metadata: dict[str, Any] = {
             "route": self.route,
             "rules_confidence": self.rules_confidence,
+            "rules_confidence_semantics": "heuristic_score_not_calibrated_probability",
             "confidence_threshold": self.confidence_threshold,
             "fallback_reason": self.fallback_reason,
         }
         if suggestion is not None:
             metadata["model_confidence"] = suggestion.get("confidence")
+            metadata["model_confidence_semantics"] = "model_reported_not_calibrated_probability"
             metadata["model_version"] = suggestion.get("classifier_version")
             metadata["model_latency_ms"] = suggestion.get("latency_ms")
         return {
@@ -94,7 +96,9 @@ def _email_mapping(email: Any) -> dict[str, str]:
 
 
 def _rules_confidence(rules: Mapping[str, Any]) -> float | None:
-    value = rules.get("confidence_score")
+    # Route using confidence in the priority decision, not the aggregate score
+    # that mixes category, response, and priority signals.
+    value = rules.get("priority_confidence_score")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     numeric = float(value)

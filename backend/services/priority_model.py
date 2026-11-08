@@ -7,6 +7,7 @@ baseline used by ``scripts.evaluate_priority_engine``:
   same TF-IDF and logistic-regression settings).
 * ``text_only_normalized`` keeps the same model but feeds it normalised text, so the
   effect of normalisation can be measured on its own.
+* ``text_word_char`` combines word and character-boundary TF-IDF representations.
 * ``text_plus_metadata`` adds the structured features from ``email_features`` next
   to the TF-IDF text features in a single scikit-learn pipeline.
 
@@ -46,7 +47,7 @@ from backend.services.email_features import (
     schema_fingerprint,
 )
 
-VARIANTS = ("text_only_legacy", "text_only_normalized", "text_plus_metadata")
+VARIANTS = ("text_only_legacy", "text_only_normalized", "text_word_char", "text_plus_metadata")
 # Chosen with a small sweep on development cross-validation only (never the frozen
 # test set); see docs/PRIORITY_ENGINE_FEATURES.md. MaxAbsScaler keeps binary flags in
 # [0, 1], so one rare feature cannot be inflated the way StandardScaler would.
@@ -136,10 +137,28 @@ def _tfidf() -> TfidfVectorizer:
     return TfidfVectorizer(ngram_range=(1, 2), min_df=1, max_features=30000, sublinear_tf=True)
 
 
-def _classifier(seed: int) -> LogisticRegression:
-    # Identical to the settings in scripts.evaluate_priority_engine
-    # (class_weight="balanced" is the project's class-imbalance handling).
-    return LogisticRegression(max_iter=2000, class_weight="balanced", random_state=seed)
+def _char_tfidf() -> TfidfVectorizer:
+    # Character-boundary n-grams capture spelling, identifiers, and short urgency
+    # phrases that word tokenisation can fragment. Kept as a separate sparse block.
+    return TfidfVectorizer(
+        analyzer="char_wb", ngram_range=(3, 5), min_df=1,
+        max_features=40000, sublinear_tf=True,
+    )
+
+
+def _classifier(
+    seed: int,
+    *,
+    c: float = 1.0,
+    class_weight: str | dict[str, float] | None = "balanced",
+) -> LogisticRegression:
+    if c <= 0:
+        raise ValueError("C must be greater than zero")
+    if class_weight not in ("balanced", None) and not isinstance(class_weight, dict):
+        raise ValueError("class_weight must be 'balanced', None, or a class-weight mapping")
+    return LogisticRegression(
+        C=float(c), max_iter=3000, class_weight=class_weight, random_state=seed,
+    )
 
 
 def build_pipeline(
@@ -150,6 +169,8 @@ def build_pipeline(
     gmail_label_mode: str = "independent",
     reference_time: datetime | None = None,
     metadata_weight: float = DEFAULT_METADATA_WEIGHT,
+    c: float = 1.0,
+    class_weight: str | dict[str, float] | None = "balanced",
 ) -> Pipeline:
     """Build an unfitted pipeline for ``variant`` (see module docstring)."""
     if variant not in VARIANTS:
@@ -159,13 +180,26 @@ def build_pipeline(
         return Pipeline([
             ("rows_to_text", RowTextExtractor("legacy")),
             ("tfidf", _tfidf()),
-            ("classifier", _classifier(seed)),
+            ("classifier", _classifier(seed, c=c, class_weight=class_weight)),
         ])
     if variant == "text_only_normalized":
         return Pipeline([
             ("rows_to_text", RowTextExtractor("normalized")),
             ("tfidf", _tfidf()),
-            ("classifier", _classifier(seed)),
+            ("classifier", _classifier(seed, c=c, class_weight=class_weight)),
+        ])
+
+    if variant == "text_word_char":
+        text = Pipeline([
+            ("rows_to_text", RowTextExtractor("normalized")),
+            ("representations", FeatureUnion([
+                ("word", _tfidf()),
+                ("character", _char_tfidf()),
+            ])),
+        ])
+        return Pipeline([
+            ("text", text),
+            ("classifier", _classifier(seed, c=c, class_weight=class_weight)),
         ])
 
     features = FeatureUnion([
@@ -188,7 +222,7 @@ def build_pipeline(
             ]),
         ),
     ])
-    return Pipeline([("features", features), ("classifier", _classifier(seed))])
+    return Pipeline([("features", features), ("classifier", _classifier(seed, c=c, class_weight=class_weight))])
 
 
 # --------------------------------------------------------------------------- #
@@ -254,6 +288,8 @@ def train_model(
     gmail_label_mode: str = "independent",
     reference_time: datetime | None = None,
     metadata_weight: float = DEFAULT_METADATA_WEIGHT,
+    c: float = 1.0,
+    class_weight: str | dict[str, float] | None = "balanced",
 ) -> TrainedEmailModel:
     """Fit a model on development rows only.
 
@@ -275,6 +311,8 @@ def train_model(
         gmail_label_mode=gmail_label_mode,
         reference_time=reference_time,
         metadata_weight=metadata_weight,
+        c=c,
+        class_weight=class_weight,
     )
     pipeline.fit([model_input_view(row) for row in rows], list(labels))
     return TrainedEmailModel(
