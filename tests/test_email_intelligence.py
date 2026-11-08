@@ -94,3 +94,13 @@ def test_payment_overdue_is_urgent_and_actionable():
 def test_follow_up_signal_is_detected():
     result = classify_email(msg(subject="Application update", snippet="Following up on your application. Any update on my application?"))
     assert "FOLLOW_UP" in result["detected_actions"]
+
+
+def test_priority_confidence_is_specific_to_the_priority_decision():
+    routine = classify_email(msg(sender="offers@example.com", subject="Weekly sale", snippet="Save 20 percent", labels=["CATEGORY_PROMOTIONS"]))
+    ambiguous = classify_email(msg(sender="person@example.com", subject="Hello there", snippet="Just saying hello"))
+    urgent = classify_email(msg(sender="security@example.com", subject="Account suspended", snippet="Immediate action required"))
+    assert routine["priority"] == "LOW" and routine["priority_confidence_score"] >= 70
+    assert ambiguous["priority"] == "NORMAL" and ambiguous["priority_confidence_score"] < 70
+    assert urgent["priority"] == "URGENT" and urgent["priority_confidence_score"] >= 90
+    assert "priority_confidence_score" not in __import__("backend.models_email_intelligence", fromlist=["EmailAnalysis"]).EmailAnalysis.__table__.columns

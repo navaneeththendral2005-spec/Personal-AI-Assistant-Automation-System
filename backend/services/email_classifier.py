@@ -364,31 +364,29 @@ def classify_email(message: Any) -> dict[str, Any]:
     payment_signal = any(term in text for term in ("payment due", "invoice due", "bill due", "payment overdue", "amount due"))
     requires_response, response_confidence, response_reason = _response_signal(text)
     if urgent_match:
-        score, priority = 95, "URGENT"
+        score, priority, priority_confidence = 95, "URGENT", 92
         priority_reason = f"Urgent signal: '{urgent_match}'."
     elif high_match or job_interview or (payment_signal and unread):
-        score, priority = 78, "HIGH"
+        score, priority, priority_confidence = 78, "HIGH", 84
         priority_reason = (
             f"High-priority signal: "
             f"'{high_match or 'time-sensitive interview/payment signal'}'."
         )
     elif requires_response:
-        score, priority = 65, "NORMAL"
-        priority_reason = (
-            f"Explicit response required: {response_reason}"
-        )
+        score, priority, priority_confidence = 65, "NORMAL", 78 if response_confidence >= 85 else 62
+        priority_reason = f"Explicit response required: {response_reason}"
     elif action_match:
-        score, priority = 55, "NORMAL"
+        score, priority, priority_confidence = 55, "NORMAL", 65
         priority_reason = f"Possible action signal: '{action_match}'."
     elif category == "PROMOTIONS" and not unread:
-        score, priority = 10, "LOW"
+        score, priority, priority_confidence = 10, "LOW", 80
         priority_reason = "Promotional message without a strong action signal."
     elif category in ("UPDATES", "PROMOTIONS") and not unread:
-        score, priority = 18, "LOW"
+        score, priority, priority_confidence = 18, "LOW", 76
         priority_reason = "Routine update without a strong action signal."
     else:
-        score, priority = 35, "NORMAL"
-        priority_reason = "No strong urgency signal detected."
+        score, priority, priority_confidence = 35, "NORMAL", 45
+        priority_reason = "No strong urgency signal detected; defaulted to NORMAL."
     actions: list[str] = []
     action_patterns = (
         ("REPLY", ("please reply", "please respond", "let me know", "respond by", "reply to this email", "awaiting your response", "kindly respond", "please get back to me", "let us know")),
@@ -424,6 +422,9 @@ def classify_email(message: Any) -> dict[str, Any]:
         "category": category,
         "priority": priority,
         "priority_score": score,
+        # Heuristic confidence for the priority decision specifically. This is
+        # transient routing metadata, not a calibrated probability or DB field.
+        "priority_confidence_score": priority_confidence,
         "confidence_score": confidence_score,
         "classification_reason": " ".join(reasons),
         "requires_response": requires_response,

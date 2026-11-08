@@ -286,3 +286,28 @@ def test_sync_accepts_maximum_of_500_and_rejects_more(db_session):
             max_results=501,
             fetcher=lambda **kwargs: [],
         )
+
+
+def test_sync_rolls_back_entire_batch_on_unexpected_normalization_error(db_session, monkeypatch):
+    import backend.services.gmail_sync_service as sync_module
+
+    original_normalize = sync_module.normalize_gmail_message
+    calls = 0
+
+    def normalize_then_fail(message):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return original_normalize(message)
+        raise RuntimeError("synthetic normalization failure")
+
+    monkeypatch.setattr(sync_module, "normalize_gmail_message", normalize_then_fail)
+    messages = [
+        {"id": "rollback-1", "subject": "Synthetic one"},
+        {"id": "rollback-2", "subject": "Synthetic two"},
+    ]
+
+    with pytest.raises(RuntimeError, match="synthetic normalization failure"):
+        sync_gmail_messages(db_session, max_results=10, fetcher=lambda **kwargs: messages)
+
+    assert list(db_session.scalars(select(EmailMessage)).all()) == []

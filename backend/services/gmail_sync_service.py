@@ -126,9 +126,15 @@ def sync_gmail_messages(
                     unchanged += 1
 
         db.commit()
-    except (SQLAlchemyError, ValueError):
+    except Exception as exc:
+        # A malformed provider payload or an unexpected normalization bug must
+        # roll back the entire multi-page batch just like a database failure.
+        # Log only the exception type: provider exceptions can contain message data.
         db.rollback()
-        logger.exception("Gmail synchronization failed; transaction rolled back")
+        logger.error(
+            "Gmail synchronization failed; transaction rolled back | error_type=%s",
+            type(exc).__name__,
+        )
         raise
 
     return {
