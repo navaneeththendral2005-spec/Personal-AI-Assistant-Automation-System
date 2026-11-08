@@ -7,7 +7,7 @@ The project combines a Python backend, Gmail integration, email classification, 
 ## Features
 
 * **Email Intelligence:** Process email content and extract useful information from messages.
-* **Priority Classification:** Classify emails by priority using rule-based and machine-learning approaches.
+* **Priority Classification:** The live inbox uses explainable rules for urgency (`LOW`, `NORMAL`, `HIGH`, `URGENT`). Separate offline experiments evaluate actionability labels (`URGENT`, `NEEDS_REPLY`, `INFORMATIONAL`).
 * **Spam Detection:** Identify potential spam messages.
 * **Response Detection:** Estimate whether an email requires a reply.
 * **Email Categorization:** Organize messages by their primary purpose.
@@ -94,13 +94,18 @@ Gmail integration may require Google Cloud project configuration and OAuth crede
 
 ### 5. Run the application
 
-Start the FastAPI application using the development server:
+Start the FastAPI application using the development server, explicitly bound to
+localhost:
 
 ```powershell
-uvicorn backend.main:app --reload
+uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Review the application routes and configuration if additional services or environment variables are required.
+Open `http://127.0.0.1:8000/docs` for the API and `http://127.0.0.1:8000/dashboard`
+for the dashboard. The API currently has no user authentication. **Do not bind it
+to `0.0.0.0`, expose it to a LAN, or publish it to the internet** without adding
+and testing an authentication and authorization layer first. Keep Gmail OAuth
+tokens, `.env`, local databases, and email datasets outside Git.
 
 ## Testing
 
@@ -118,7 +123,7 @@ python -m pytest -q tests/test_email_labeling_workflow.py
 python -m pytest -q tests/test_priority_engine_splits.py
 ```
 
-The project has previously passed 176 automated tests. Run the suite against the current checkout to verify its status.
+The reviewed source snapshot passes 538 automated tests. Re-run the suite against your local checkout after configuring its environment.
 
 ## Email Labeling and Evaluation
 
@@ -127,6 +132,16 @@ FRIDAY's classifier evaluation uses human-verified `true_*` fields as ground tru
 Development cross-validation is used for model selection, while frozen holdout assignments are reserved for independent evaluation. Private evaluation manifests and email datasets should not be published.
 
 Refer to `docs/EMAIL_LABELING_GUIDE.md` for annotation rules and the other documents in `docs/` for implementation and evaluation details.
+
+### Hybrid classification preview
+
+The normal `/gmail/intelligence/analyze` workflow remains rules-based and is the only path that writes stored email analysis. For an explicit, non-persistent local Ollama advisory, call:
+
+```http
+POST /gmail/intelligence/emails/{email_id}/classification-preview
+```
+
+The preview returns the rules result and (when configured and needed) a separate Ollama suggestion. It does not update the database or Gmail. The two priority vocabularies are intentionally not mapped: runtime urgency (`LOW|NORMAL|HIGH|URGENT`) differs from experimental actionability (`URGENT|NEEDS_REPLY|INFORMATIONAL|SPAM`). The priority-specific routing confidence is a heuristic, not a calibrated probability.
 
 ## Security and Privacy
 
@@ -143,3 +158,16 @@ FRIDAY is an actively developed personal AI assistant. Features, integrations, a
 ## License
 
 No license has been specified yet. Add a license before distributing the project for reuse.
+
+### Phase 5 release-readiness checks
+
+Run the API integration and database migration smoke tests with the full suite:
+
+```powershell
+python -m pytest -q
+```
+
+The isolated tests exercise mocked Gmail sync → analysis ordering and SQLite
+migration reversibility. Before using your real local services, follow
+[`docs/PHASE5_RELEASE_READINESS.md`](docs/PHASE5_RELEASE_READINESS.md) for the
+PostgreSQL, Gmail OAuth, Ollama, and local API checks.

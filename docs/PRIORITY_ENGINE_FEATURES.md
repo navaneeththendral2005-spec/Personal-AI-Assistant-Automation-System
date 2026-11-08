@@ -131,3 +131,28 @@ set is never used to choose a variant.
 - Dataset card and feature documentation
 - 155 new tests covering normalisation, missing/malformed metadata, and ground-truth leakage
 ```
+
+
+## Priority model optimisation update
+
+The reusable model pipeline now also supports a ``text_word_char`` variant, which
+combines normalised word n-grams with character-boundary n-grams. Logistic Regression
+``C`` and ``class_weight`` are explicit training parameters, while the original
+``text_only_legacy`` defaults remain unchanged for baseline reproducibility.
+
+For priority-only optimisation, run the existing evaluator with ``--task priority
+--tune-priority --development-only``. This invokes nested stratified cross-validation on development rows and explicitly skips frozen-test scoring during tuning:
+inner folds select among a pre-declared set of word-only / word-plus-character models,
+regularisation strengths, and balanced / unweighted class handling; outer folds produce
+the comparison against the fixed legacy baseline. The frozen test IDs are excluded from
+all fitting and selection.
+
+Class-specific decision-threshold calibration is intentionally gated at a minimum of
+10 development examples per class. With the current development support (8 URGENT,
+4 NEEDS_REPLY, 49 INFORMATIONAL), threshold tuning is deferred because it would fit
+noise in the rare classes. The evaluator reports this explicitly rather than presenting
+unstable thresholds as an improvement.
+
+The private dataset and frozen manifest are not included in source archives, so model
+selection must be run locally against the user's canonical dataset. No tuned model is
+selected or deployed based on synthetic examples.

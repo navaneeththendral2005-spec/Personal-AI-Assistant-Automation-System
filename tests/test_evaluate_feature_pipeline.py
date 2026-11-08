@@ -204,3 +204,43 @@ def test_cli_writes_json_and_markdown(dataset, tmp_path, capsys):
     assert "FRIDAY feature-pipeline evaluation" in out_md.read_text(encoding="utf-8")
     assert "aggregate numbers only" in capsys.readouterr().out
     assert main(["--input", str(tmp_path / "missing.csv"), "--output-json", str(out_json), "--output-md", str(out_md)]) == 2
+
+
+def test_priority_nested_tuning_is_development_only_and_gates_thresholds():
+    from scripts.evaluate_feature_pipeline import _priority_nested_cv
+
+    labels = ("URGENT", "NEEDS_REPLY", "INFORMATIONAL")
+    examples = {
+        "URGENT": "urgent immediate deadline action required today",
+        "NEEDS_REPLY": "please reply respond confirm your availability",
+        "INFORMATIONAL": "weekly digest routine update for your information",
+    }
+    items = []
+    for label, text in examples.items():
+        for index in range(6):
+            row = {
+                "email_id": f"private-{label}-{index}",
+                "sender": f"{label.lower()}@example.test",
+                "subject": text,
+                "snippet": text,
+                "body_text": text,
+            }
+            items.append({"row": row, "truth": label, "key": row["email_id"]})
+
+    report = _priority_nested_cv(items, labels, folds=3, seed=42, frozen_ids=set())
+    assert report["status"] == "ok"
+    assert report["outer_folds"] == 3
+    assert report["threshold_tuning"]["status"] == "deferred_insufficient_class_support"
+    assert len(report["selected_config_by_outer_fold"]) == 3
+    assert report["final_config_selected_from_development"]["variant"] in {
+        "text_only_legacy", "text_word_char",
+    }
+    assert "private-" not in json.dumps(report)
+
+
+def test_development_only_mode_never_scores_frozen_test(dataset):
+    data, manifest, _ = dataset
+    report = evaluate_feature_pipeline(
+        data, manifest, tasks=("is_spam",), development_only=True,
+    )
+    assert report["tasks"]["is_spam"]["frozen_test"]["status"] == "skipped_by_request_development_only"

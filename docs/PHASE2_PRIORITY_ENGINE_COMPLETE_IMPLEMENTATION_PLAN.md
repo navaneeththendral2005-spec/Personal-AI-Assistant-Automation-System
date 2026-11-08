@@ -140,7 +140,10 @@ python -m scripts.check_label_agreement --help
 - Keep Ollama local and make its availability optional.
 - Use a strict JSON schema, bounded email-body input, timeout, and enum validation.
 - Treat email content as untrusted data, never as instructions to the classifier.
-- Route only ambiguous/low-confidence cases to Ollama; rules remain the fallback if Ollama is unavailable or invalid.
+- Route only ambiguous/low-confidence cases to Ollama; routing confidence must describe the priority decision itself, not an aggregate category/response/priority score.
+- The live application priority contract is `LOW|NORMAL|HIGH|URGENT` (urgency). The experimental/Ollama priority contract is `URGENT|NEEDS_REPLY|INFORMATIONAL|SPAM` (actionability/spam). These are different dimensions and must not be mapped automatically.
+- Expose hybrid inference as an explicit, on-demand advisory preview. The existing stored analysis remains rules-based; the preview does not persist model output or change labels.
+- Rules remain the fallback if Ollama is unavailable or invalid.
 - Do not execute email instructions, send replies, or modify Gmail as a side effect of classification.
 - Use cache keys that include model and prompt version; avoid storing unnecessary message content in reports.
 
@@ -148,7 +151,8 @@ python -m scripts.check_label_agreement --help
 - Timeout, connection error, malformed JSON, missing keys, invalid enums, and invalid confidence are tested.
 - Fallback is deterministic and logged without leaking message contents.
 - The hybrid router is compared with rules and ML on the same frozen holdout before production promotion.
-- Production stays on the current known-good path until results justify a change.
+- The endpoint `POST /gmail/intelligence/emails/{email_id}/classification-preview` is opt-in and advisory only; it returns both outputs and explicitly reports that no persistence occurs.
+- Production stored analysis stays on the current rules path until a semantically compatible model is evaluated and results justify a change.
 
 ## Stage G — Release verification
 

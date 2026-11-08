@@ -43,3 +43,11 @@ Historical test counts in earlier development documents refer to different snaps
 - Added synthetic offline tests and documented configuration/verification.
 - Existing production email analysis remains rules-only pending Phase 4 benchmarking
   and Phase 5 integration.
+
+
+## 2026-11-08 — Priority routing and hybrid preview safety
+
+- Added a priority-specific heuristic confidence signal so hybrid routing no longer uses the aggregate confidence score for category/response/priority. This score is not calibrated and is used only as a routing heuristic.
+- Added an explicit on-demand hybrid classification preview endpoint. It returns rules output and a separately labeled Ollama suggestion without persisting either preview result or changing stored labels.
+- Documented the semantic mismatch between runtime urgency (`LOW|NORMAL|HIGH|URGENT`) and experimental actionability (`URGENT|NEEDS_REPLY|INFORMATIONAL|SPAM`); no automatic mapping or model promotion is performed.
+- Kept the existing offline ML pipeline development-only because prior controlled evaluation did not establish a reliable improvement.

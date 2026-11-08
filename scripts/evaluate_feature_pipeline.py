@@ -21,9 +21,11 @@ Evaluation protocol
 * Models are trained on development rows only; ``train_model`` aborts if any training
   row is a frozen test row. Truth, adjudication, and prediction columns cannot reach
   the feature code (see ``backend.services.email_features``).
-* Stratified k-fold cross-validation on development rows, then ONE fit on all
-  development rows scored once on the frozen test rows, with a paired bootstrap of the
-  macro-F1 difference against the legacy baseline.
+* Stratified cross-validation on development rows, then ONE fit on all development
+  rows scored once on the frozen test rows, with a paired bootstrap against baseline.
+* Optional ``--tune-priority`` runs nested development-only CV over word/character
+  TF-IDF, Logistic Regression C, and class-weight settings. Pair it with
+  ``--development-only`` to keep the frozen test completely unevaluated during tuning.
 * The report contains aggregate numbers only: no IDs, senders, subjects, or bodies.
 """
 from __future__ import annotations
@@ -60,6 +62,7 @@ EXPERIMENTS: tuple[tuple[str, str, str], ...] = (
     # (name, pipeline variant, Gmail label mode)
     ("text_only_legacy", "text_only_legacy", "independent"),
     ("text_only_normalized", "text_only_normalized", "independent"),
+    ("text_word_char", "text_word_char", "independent"),
     ("text_plus_metadata", "text_plus_metadata", "independent"),
     ("text_plus_metadata_gmail_assisted", "text_plus_metadata", "gmail_assisted"),
 )
@@ -68,6 +71,22 @@ SMALL_TEST_SET = 30
 # development cross-validation macro-F1 by at least this margin. The frozen test set
 # is never used to choose a variant.
 RECOMMENDATION_MARGIN = 0.03
+
+
+# Pre-declared search space. Hyperparameters are selected inside each outer
+# development fold, so the outer predictions remain an honest estimate.
+PRIORITY_CANDIDATES: tuple[dict[str, Any], ...] = (
+    {"variant": "text_only_legacy", "c": 1.0, "class_weight": "balanced"},
+    {"variant": "text_only_legacy", "c": 0.1, "class_weight": "balanced"},
+    {"variant": "text_only_legacy", "c": 10.0, "class_weight": "balanced"},
+    {"variant": "text_word_char", "c": 0.1, "class_weight": "balanced"},
+    {"variant": "text_word_char", "c": 1.0, "class_weight": "balanced"},
+    {"variant": "text_word_char", "c": 10.0, "class_weight": "balanced"},
+    {"variant": "text_word_char", "c": 0.1, "class_weight": None},
+    {"variant": "text_word_char", "c": 1.0, "class_weight": None},
+    {"variant": "text_word_char", "c": 10.0, "class_weight": None},
+)
+MIN_CLASS_SUPPORT_FOR_THRESHOLD_TUNING = 10
 
 
 class FeatureEvaluationError(ValueError):
@@ -212,6 +231,116 @@ def _cross_validate(dev, task, labels, *, folds, seed, frozen_ids, reference_tim
     return {"status": "ok", "folds": n_splits, "variants": results}
 
 
+def _priority_nested_cv(dev, labels, *, folds, seed, frozen_ids):
+    """Tune priority text/model settings inside development-only nested CV."""
+    from sklearn.model_selection import StratifiedKFold
+
+    y = [item["truth"] for item in dev]
+    counts = Counter(y)
+    outer_folds = min(folds, min(counts.values())) if len(counts) >= 2 else 0
+    if outer_folds < 2:
+        return {"status": "insufficient_data_for_nested_cv"}
+
+    baseline_predictions = [""] * len(dev)
+    tuned_predictions = [""] * len(dev)
+    chosen: list[dict[str, Any]] = []
+    observed_inner_folds: list[int] = []
+    outer = StratifiedKFold(n_splits=outer_folds, shuffle=True, random_state=seed)
+
+    for outer_train_idx, outer_valid_idx in outer.split(dev, y):
+        outer_train = [dev[i] for i in outer_train_idx]
+        outer_valid = [dev[i] for i in outer_valid_idx]
+        inner_y = [item["truth"] for item in outer_train]
+        inner_counts = Counter(inner_y)
+        inner_folds = min(3, min(inner_counts.values())) if len(inner_counts) >= 2 else 0
+        if inner_folds < 2:
+            return {"status": "insufficient_data_for_inner_cv"}
+        observed_inner_folds.append(inner_folds)
+        inner = StratifiedKFold(n_splits=inner_folds, shuffle=True, random_state=seed)
+
+        candidate_scores: list[tuple[float, dict[str, Any]]] = []
+        for config in PRIORITY_CANDIDATES:
+            scores: list[float] = []
+            for train_idx, valid_idx in inner.split(outer_train, inner_y):
+                train_items = [outer_train[i] for i in train_idx]
+                valid_items = [outer_train[i] for i in valid_idx]
+                model = train_model(
+                    [item["row"] for item in train_items],
+                    [item["truth"] for item in train_items],
+                    keys=[item["key"] for item in train_items],
+                    frozen_test_ids=frozen_ids, variant=config["variant"], seed=seed,
+                    task="priority", gmail_label_mode="independent", c=config["c"],
+                    class_weight=config["class_weight"],
+                )
+                predicted = model.predict([item["row"] for item in valid_items])
+                scores.append(metrics(
+                    [item["truth"] for item in valid_items], predicted, labels
+                )["macro_f1"])
+            candidate_scores.append((sum(scores) / len(scores), config))
+
+        # Stable ordering means ties favour the simpler legacy baseline.
+        best_score, best_config = max(candidate_scores, key=lambda pair: pair[0])
+        chosen.append({**best_config, "inner_macro_f1": round(best_score, 4)})
+
+        baseline = train_model(
+            [item["row"] for item in outer_train],
+            [item["truth"] for item in outer_train],
+            keys=[item["key"] for item in outer_train], frozen_test_ids=frozen_ids,
+            variant="text_only_legacy", seed=seed, task="priority", c=1.0,
+            class_weight="balanced",
+        )
+        tuned = train_model(
+            [item["row"] for item in outer_train],
+            [item["truth"] for item in outer_train],
+            keys=[item["key"] for item in outer_train], frozen_test_ids=frozen_ids,
+            variant=best_config["variant"], seed=seed, task="priority",
+            c=best_config["c"], class_weight=best_config["class_weight"],
+        )
+        baseline_fold = baseline.predict([item["row"] for item in outer_valid])
+        tuned_fold = tuned.predict([item["row"] for item in outer_valid])
+        for index, prediction in zip(outer_valid_idx, baseline_fold):
+            baseline_predictions[index] = prediction
+        for index, prediction in zip(outer_valid_idx, tuned_fold):
+            tuned_predictions[index] = prediction
+
+    baseline_metrics = metrics(y, baseline_predictions, labels)
+    tuned_metrics = metrics(y, tuned_predictions, labels)
+    # Select the final fit configuration by outer-fold selection frequency; break
+    # ties by mean inner-CV score. This choice uses development data only.
+    config_groups: dict[tuple[str, float, str | None], list[float]] = {}
+    for item in chosen:
+        key = (item["variant"], float(item["c"]), item["class_weight"])
+        config_groups.setdefault(key, []).append(float(item["inner_macro_f1"]))
+    final_key = max(
+        config_groups,
+        key=lambda key: (len(config_groups[key]), sum(config_groups[key]) / len(config_groups[key])),
+    )
+    final_config = {"variant": final_key[0], "c": final_key[1], "class_weight": final_key[2]}
+    support = {label: counts.get(label, 0) for label in labels}
+    threshold_ready = all(value >= MIN_CLASS_SUPPORT_FOR_THRESHOLD_TUNING for value in support.values())
+    return {
+        "status": "ok",
+        "protocol": "nested stratified CV; hyperparameters selected only inside each outer training fold",
+        "outer_folds": outer_folds,
+        "inner_folds": min(observed_inner_folds),
+        "baseline": baseline_metrics,
+        "tuned": tuned_metrics,
+        "macro_f1_delta": round(tuned_metrics["macro_f1"] - baseline_metrics["macro_f1"], 4),
+        "selected_config_by_outer_fold": chosen,
+        "final_config_selected_from_development": final_config,
+        "threshold_tuning": {
+            "status": "not_run" if threshold_ready else "deferred_insufficient_class_support",
+            "minimum_examples_per_class": MIN_CLASS_SUPPORT_FOR_THRESHOLD_TUNING,
+            "development_class_support": support,
+            "reason": (
+                "Threshold calibration is not applied in this pass. It remains deferred until every class "
+                "has sufficient development support; with rare classes, tuning thresholds would overfit "
+                "a handful of examples."
+            ),
+        },
+    }
+
+
 def recommend_variant(cv: dict[str, Any]) -> dict[str, Any]:
     """Pick a variant from development cross-validation only (never the test set)."""
     basis = (
@@ -260,7 +389,7 @@ def _paired_bootstrap(y_true, baseline, candidate, labels, *, resamples, seed):
     }
 
 
-def _frozen_test(dev, test, task, labels, *, seed, frozen_ids, reference_time, weight, bootstrap):
+def _frozen_test(dev, test, task, labels, *, seed, frozen_ids, reference_time, weight, bootstrap, priority_config=None):
     y_true = [item["truth"] for item in test]
     if len({item["truth"] for item in dev}) < 2:
         return {"status": "insufficient_training_classes"}
@@ -274,6 +403,20 @@ def _frozen_test(dev, test, task, labels, *, seed, frozen_ids, reference_time, w
             results[name] = {"status": "failed", "error_type": type(exc).__name__}
             continue
         results[name] = metrics(y_true, predictions[name], labels)
+
+    if task == "priority" and priority_config:
+        try:
+            tuned_model = train_model(
+                [item["row"] for item in dev],
+                [item["truth"] for item in dev],
+                keys=[item["key"] for item in dev], frozen_test_ids=frozen_ids,
+                variant=priority_config["variant"], seed=seed, task="priority",
+                c=priority_config["c"], class_weight=priority_config["class_weight"],
+            )
+            predictions["nested_tuned"] = tuned_model.predict([item["row"] for item in test])
+            results["nested_tuned"] = metrics(y_true, predictions["nested_tuned"], labels)
+        except Exception as exc:
+            results["nested_tuned"] = {"status": "failed", "error_type": type(exc).__name__}
 
     paired: dict[str, Any] = {}
     if BASELINE in predictions:
@@ -327,6 +470,8 @@ def evaluate_feature_pipeline(
     metadata_weight: float = DEFAULT_METADATA_WEIGHT,
     bootstrap: int = 500,
     tasks: tuple[str, ...] | None = None,
+    tune_priority: bool = False,
+    development_only: bool = False,
 ) -> dict[str, Any]:
     headers, rows = read_rows(input_path)
     selected_tasks = tasks or tuple(TASKS)
@@ -400,10 +545,20 @@ def evaluate_feature_pipeline(
             dev, task, labels, folds=folds, seed=seed, frozen_ids=frozen_ids,
             reference_time=reference_time, weight=metadata_weight,
         )
-        if test:
+        if task == "priority" and tune_priority:
+            entry["priority_model_tuning"] = _priority_nested_cv(
+                dev, labels, folds=min(folds, 4), seed=seed, frozen_ids=frozen_ids,
+            )
+        if development_only:
+            entry["frozen_test"] = {"status": "skipped_by_request_development_only"}
+        elif test:
             entry["frozen_test"] = _frozen_test(
                 dev, test, task, labels, seed=seed, frozen_ids=frozen_ids,
                 reference_time=reference_time, weight=metadata_weight, bootstrap=bootstrap,
+                priority_config=(
+                    entry.get("priority_model_tuning", {}).get("final_config_selected_from_development")
+                    if task == "priority" and tune_priority else None
+                ),
             )
         else:
             entry["frozen_test"] = {"status": "no_frozen_test_rows"}
@@ -466,6 +621,18 @@ def render_markdown(report: dict[str, Any]) -> str:
             lines.append("")
         else:
             lines += [f"Cross-validation: {cv.get('status')}", ""]
+        tuning = entry.get("priority_model_tuning")
+        if isinstance(tuning, dict) and tuning.get("status") == "ok":
+            lines += ["### Nested development-only model tuning", "",
+                      "| Model | Accuracy | Macro-F1 |", "|---|---:|---:|"]
+            for name in ("baseline", "tuned"):
+                score = tuning[name]
+                lines.append(f"| {name} | {_fmt(score.get('accuracy'))} | {_fmt(score.get('macro_f1'))} |")
+            lines.append(
+                f"\nMacro-F1 change: **{tuning['macro_f1_delta']:+.3f}**. "
+                f"Development-selected final config: `{tuning['final_config_selected_from_development']}`. "
+                f"Threshold tuning: `{tuning['threshold_tuning']['status']}`.\n"
+            )
         frozen = entry["frozen_test"]
         if frozen.get("status") == "ok":
             lines += [f"### Frozen test ({frozen['test_samples']} rows)", "",
@@ -510,6 +677,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--metadata-weight", type=float, default=DEFAULT_METADATA_WEIGHT)
     parser.add_argument("--bootstrap", type=int, default=500)
     parser.add_argument("--task", action="append", choices=sorted(TASKS), help="Limit to one or more tasks.")
+    parser.add_argument("--tune-priority", action="store_true", help="Run nested development-only priority hyperparameter tuning.")
+    parser.add_argument("--development-only", action="store_true", help="Do not evaluate the frozen test set; use while tuning.")
     args = parser.parse_args(argv)
 
     try:
@@ -517,6 +686,8 @@ def main(argv: list[str] | None = None) -> int:
             args.input, args.manifest, seed=args.seed, folds=args.folds,
             metadata_weight=args.metadata_weight, bootstrap=args.bootstrap,
             tasks=tuple(args.task) if args.task else None,
+            tune_priority=args.tune_priority,
+            development_only=args.development_only,
         )
     except FeatureEvaluationError as exc:
         print(f"Error: {exc}", file=sys.stderr)
