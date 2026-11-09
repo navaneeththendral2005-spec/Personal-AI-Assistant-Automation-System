@@ -5,7 +5,7 @@ can remain unchanged. Import this module before Alembic autogenerate if needed.
 """
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -13,10 +13,13 @@ from backend.database import Base
 
 class EmailAnalysis(Base):
     __tablename__ = "email_analyses"
+    __table_args__ = (
+        UniqueConstraint("email_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     email_id: Mapped[int] = mapped_column(
-        ForeignKey("emails.id", ondelete="CASCADE"), unique=True, nullable=False, index=True
+        ForeignKey("emails.id", ondelete="CASCADE"), nullable=False, index=True
     )
     category: Mapped[str] = mapped_column(String(32), nullable=False, index=True, default="OTHER")
     priority: Mapped[str] = mapped_column(String(16), nullable=False, index=True, default="NORMAL")

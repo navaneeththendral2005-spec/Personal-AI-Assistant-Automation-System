@@ -120,5 +120,32 @@ def test_alembic_schema_upgrades_and_downgrades_on_isolated_sqlite(tmp_path, mon
     config = Config(str(project_root / "alembic.ini"))
     config.set_main_option("script_location", str(project_root / "migrations"))
     command.upgrade(config, "head")
+
+    # The final revision must create every index declared by the ORM models.
+    from sqlalchemy import create_engine, inspect
+
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    inspector = inspect(engine)
+    task_indexes = {item["name"] for item in inspector.get_indexes("tasks")}
+    assert {"ix_tasks_title", "ix_tasks_is_completed", "ix_tasks_due_at"} <= task_indexes
+
+    # Keep the unique constraints and their separately declared lookup indexes
+    # aligned with the historical migrations (rather than replacing them with
+    # unique indexes during autogenerate).
+    email_constraints = {
+        item["name"] for item in inspector.get_unique_constraints("emails")
+    }
+    analysis_constraints = inspector.get_unique_constraints("email_analyses")
+    assert "uq_emails_gmail_message_id" in email_constraints
+    assert any(item["column_names"] == ["email_id"] for item in analysis_constraints)
+
+    email_indexes = {item["name"]: item for item in inspector.get_indexes("emails")}
+    analysis_indexes = {
+        item["name"]: item for item in inspector.get_indexes("email_analyses")
+    }
+    assert not email_indexes["ix_emails_gmail_message_id"]["unique"]
+    assert not analysis_indexes["ix_email_analyses_email_id"]["unique"]
+    engine.dispose()
+
     command.downgrade(config, "base")
     command.upgrade(config, "head")

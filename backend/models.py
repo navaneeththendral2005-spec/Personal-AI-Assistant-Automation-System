@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -27,6 +27,9 @@ class Task(Base):
 
 class EmailMessage(Base):
     __tablename__ = "emails"
+    __table_args__ = (
+        UniqueConstraint("gmail_message_id", name="uq_emails_gmail_message_id"),
+    )
 
     id: Mapped[int] = mapped_column(
         Integer,
@@ -36,7 +39,6 @@ class EmailMessage(Base):
 
     gmail_message_id: Mapped[str] = mapped_column(
         String(255),
-        unique=True,
         nullable=False,
         index=True,
     )
