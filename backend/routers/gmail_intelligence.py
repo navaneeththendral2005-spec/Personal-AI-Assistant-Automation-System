@@ -7,6 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from backend.database import SessionLocal
+from backend.services.gmail_auth import GmailAuthorizationError
 from backend.schemas_email_intelligence import AskInboxRequest, CreateTaskFromEmailRequest
 from backend.services.email_intelligence_service import (
     analyze_stored_emails,
@@ -15,7 +16,6 @@ from backend.services.email_intelligence_service import (
     get_email_analysis,
     get_insights,
     list_analyzed_emails,
-    preview_hybrid_classification,
     summarize_inbox,
 )
 
@@ -53,9 +53,16 @@ def sync_and_analyze(max_results: int = Query(default=10, ge=1, le=500), db: Ses
         return {"sync": sync_result, "analysis": analysis_result}
     except ValueError as exc:
         db.rollback(); raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except GmailAuthorizationError as exc:
+        db.rollback()
+        raise HTTPException(status_code=401, detail="Gmail authorization is required. Reauthorize Gmail and retry.") from exc
+    except FileNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Gmail OAuth credentials are not configured.") from exc
     except Exception as exc:
         db.rollback()
-        # Provider exceptions can contain message content or account metadata.
+        # Provider exceptions can contain message content, request URLs, or tokens.
+        # Log only the exception type; never emit its message or traceback here.
         logger.error("Sync and analyze failed | error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=502, detail="Gmail sync or email analysis failed. Check server logs.") from exc
 
@@ -84,18 +91,6 @@ def emails(
     except SQLAlchemyError as exc:
         logger.exception("Email intelligence query failed")
         raise HTTPException(status_code=500, detail="Unable to retrieve analyzed emails.") from exc
-
-
-@router.post("/emails/{email_id}/classification-preview")
-def hybrid_classification_preview(email_id: int, db: Session = Depends(get_db)):
-    """Run an on-demand local-model advisory; never persists or changes labels."""
-    try:
-        result = preview_hybrid_classification(db, email_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if result is None:
-        raise HTTPException(status_code=404, detail="Stored email not found.")
-    return result
 
 
 @router.get("/emails/{email_id}")

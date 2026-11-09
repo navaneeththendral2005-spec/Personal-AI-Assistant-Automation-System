@@ -1,29 +1,41 @@
+from __future__ import annotations
+
 import os
 from pathlib import Path
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 
-
-# Gmail read-only access.
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
-# FRIDAY project root.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-# Local OAuth files.
 CREDENTIALS_FILE = PROJECT_ROOT / "secrets" / "credentials.json"
 TOKEN_FILE = PROJECT_ROOT / "secrets" / "token.json"
 
 
-def get_gmail_credentials() -> Credentials:
-    """
-    Return valid Gmail OAuth credentials.
+class GmailAuthorizationError(Exception):
+    """Raised when Gmail authorization is missing, invalid, or expired."""
 
-    If an existing token is available, reuse it and refresh it when needed.
-    Otherwise, launch Google's OAuth consent flow in the browser.
-    """
+
+def _load_google_auth_dependencies():
+    """Load Google OAuth dependencies only when authentication is requested."""
+    from google.auth.exceptions import RefreshError
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+
+    return Request, Credentials, InstalledAppFlow, RefreshError
+
+
+def get_gmail_credentials(
+    *,
+    allow_interactive: bool = True,
+) -> Credentials:
+    """Return valid Gmail OAuth credentials."""
+
+    Request, Credentials, InstalledAppFlow, RefreshError = (
+        _load_google_auth_dependencies()
+    )
+
     credentials = None
 
     if TOKEN_FILE.exists():
@@ -33,12 +45,22 @@ def get_gmail_credentials() -> Credentials:
         )
 
     if credentials and credentials.expired and credentials.refresh_token:
-        credentials.refresh(Request())
+        try:
+            credentials.refresh(Request())
+        except RefreshError as exc:
+            raise GmailAuthorizationError(
+                "Gmail authorization has expired. Reauthorization is required."
+            ) from exc
 
     if not credentials or not credentials.valid:
+        if not allow_interactive:
+            raise GmailAuthorizationError(
+                "Gmail authorization is not valid. Reauthorization is required."
+            )
+
         if not CREDENTIALS_FILE.exists():
             raise FileNotFoundError(
-                f"Google OAuth credentials not found: {CREDENTIALS_FILE}"
+                "Google OAuth credentials file is missing."
             )
 
         flow = InstalledAppFlow.from_client_secrets_file(
@@ -53,13 +75,14 @@ def get_gmail_credentials() -> Credentials:
 
     TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    # Restrict token file permissions where supported.
-    TOKEN_FILE.write_text(credentials.to_json(), encoding="utf-8")
+    TOKEN_FILE.write_text(
+        credentials.to_json(),
+        encoding="utf-8",
+    )
 
     try:
         os.chmod(TOKEN_FILE, 0o600)
     except OSError:
-        # Windows may not support Unix-style permissions.
         pass
 
     return credentials

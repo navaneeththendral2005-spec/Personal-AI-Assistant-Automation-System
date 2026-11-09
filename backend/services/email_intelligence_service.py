@@ -13,7 +13,10 @@ from sqlalchemy.orm import Session
 from backend.models import EmailMessage, Task
 from backend.models_email_intelligence import EmailAnalysis
 from backend.services.email_classifier import classify_email
-from backend.services.hybrid_router import HybridConfig, classify_hybrid
+from backend.services.hybrid_router import classify_hybrid
+
+PRODUCTION_CLASSIFIER_METHOD = "rules"
+PRODUCTION_CLASSIFIER_VERSION = "friday-rules-v1"
 
 
 def _same_analysis_value(current: Any, incoming: Any) -> bool:
@@ -68,34 +71,39 @@ def analyze_stored_emails(db: Session, limit: int = 100) -> dict[str, Any]:
     emails = db.query(EmailMessage).order_by(EmailMessage.message_date.desc(), EmailMessage.id.desc()).limit(limit).all()
     created = updated = unchanged = 0
     now = datetime.now(timezone.utc)
-    persisted_fields = set(EmailAnalysis.__table__.columns.keys()) - {"id", "email_id"}
     try:
         for email in emails:
-            result = classify_email(email)
+            # Persist only fields represented by the EmailAnalysis ORM schema.
+            # Classifier-only routing signals remain transient.
+            persistable_fields = set(EmailAnalysis.__table__.columns.keys()) - {"id", "email_id"}
+            result = {
+                key: value
+                for key, value in classify_email(email).items()
+                if key in persistable_fields
+            }
             row = db.query(EmailAnalysis).filter(EmailAnalysis.email_id == email.id).one_or_none()
             if row is None:
                 row = EmailAnalysis(email_id=email.id)
                 db.add(row)
                 for key, value in result.items():
-                    if key in persisted_fields:
-                        setattr(row, key, value)
-                row.classifier_method = "rules"
-                row.classifier_version = "friday-rules-v1"
+                    setattr(row, key, value)
+                row.classifier_method = PRODUCTION_CLASSIFIER_METHOD
+                row.classifier_version = PRODUCTION_CLASSIFIER_VERSION
                 row.analysis_status = "complete"
                 row.analyzed_at = now
                 created += 1
                 continue
 
-            changed = any(
-                not _same_analysis_value(getattr(row, key), value)
-                for key, value in result.items() if key in persisted_fields
+            changed = any(not _same_analysis_value(getattr(row, key), value) for key, value in result.items())
+            provenance_changed = (
+                row.classifier_method != PRODUCTION_CLASSIFIER_METHOD
+                or row.classifier_version != PRODUCTION_CLASSIFIER_VERSION
             )
-            if changed or row.analysis_status != "complete":
+            if changed or provenance_changed or row.analysis_status != "complete":
                 for key, value in result.items():
-                    if key in persisted_fields:
-                        setattr(row, key, value)
-                row.classifier_method = "rules"
-                row.classifier_version = "friday-rules-v1"
+                    setattr(row, key, value)
+                row.classifier_method = PRODUCTION_CLASSIFIER_METHOD
+                row.classifier_version = PRODUCTION_CLASSIFIER_VERSION
                 row.analysis_status = "complete"
                 row.analyzed_at = now
                 updated += 1
@@ -109,26 +117,6 @@ def analyze_stored_emails(db: Session, limit: int = 100) -> dict[str, Any]:
         "status": "success", "analyzed": len(emails), "created": created,
         "updated": updated, "unchanged": unchanged,
         "message": "Stored email content analyzed; Gmail messages were not modified.",
-    }
-
-
-def preview_hybrid_classification(
-    db: Session, email_id: int, *, config: HybridConfig | None = None
-) -> dict[str, Any] | None:
-    """Return an on-demand rules/Ollama advisory without changing stored analysis."""
-    email = db.query(EmailMessage).filter(EmailMessage.id == email_id).one_or_none()
-    if email is None:
-        return None
-    result = classify_hybrid(email, config=config)
-    return {
-        "email_id": email.id,
-        "persistence": "none",
-        "priority_semantics": {
-            "rules": "LOW|NORMAL|HIGH|URGENT (runtime urgency)",
-            "ollama": "URGENT|NEEDS_REPLY|INFORMATIONAL|SPAM (advisory intent)",
-            "warning": "These priority vocabularies are different and must not be mapped automatically.",
-        },
-        **result.as_dict(),
     }
 
 
@@ -175,6 +163,28 @@ def list_analyzed_emails(
 def get_email_analysis(db: Session, email_id: int) -> dict[str, Any] | None:
     pair = db.query(EmailAnalysis, EmailMessage).join(EmailMessage, EmailAnalysis.email_id == EmailMessage.id).filter(EmailMessage.id == email_id).one_or_none()
     return _analysis_payload(*pair) if pair else None
+
+
+def preview_hybrid_classification(db: Session, email_id: int) -> dict[str, Any] | None:
+    """Return an advisory rules/Ollama preview without writing to the database.
+
+    The hybrid model's priority-intent suggestions are deliberately kept separate
+    from the production LOW/NORMAL/HIGH/URGENT priority scale.
+    """
+    email = db.query(EmailMessage).filter(EmailMessage.id == email_id).one_or_none()
+    if email is None:
+        return None
+
+    result = classify_hybrid(email).as_dict()
+    result["persistence"] = "none"
+    result["priority_semantics"] = {
+        "warning": (
+            "The advisory model uses action-intent labels (URGENT, NEEDS_REPLY, "
+            "INFORMATIONAL), while production uses severity levels "
+            "(LOW, NORMAL, HIGH, URGENT). These labels have different meanings and are not interchangeable."
+        )
+    }
+    return result
 
 
 def get_insights(db: Session) -> dict[str, Any]:

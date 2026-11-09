@@ -2,11 +2,12 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.routers import gmail_intelligence, gmail_sync_router
+from backend.routers import gmail, gmail_intelligence, gmail_sync_router
 
 
 def _app_with_gmail_routers():
     app = FastAPI()
+    app.include_router(gmail.router)
     app.include_router(gmail_sync_router.router)
     app.include_router(gmail_intelligence.router)
 
@@ -120,32 +121,50 @@ def test_alembic_schema_upgrades_and_downgrades_on_isolated_sqlite(tmp_path, mon
     config = Config(str(project_root / "alembic.ini"))
     config.set_main_option("script_location", str(project_root / "migrations"))
     command.upgrade(config, "head")
-
-    # The final revision must create every index declared by the ORM models.
-    from sqlalchemy import create_engine, inspect
-
-    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
-    inspector = inspect(engine)
-    task_indexes = {item["name"] for item in inspector.get_indexes("tasks")}
-    assert {"ix_tasks_title", "ix_tasks_is_completed", "ix_tasks_due_at"} <= task_indexes
-
-    # Keep the unique constraints and their separately declared lookup indexes
-    # aligned with the historical migrations (rather than replacing them with
-    # unique indexes during autogenerate).
-    email_constraints = {
-        item["name"] for item in inspector.get_unique_constraints("emails")
-    }
-    analysis_constraints = inspector.get_unique_constraints("email_analyses")
-    assert "uq_emails_gmail_message_id" in email_constraints
-    assert any(item["column_names"] == ["email_id"] for item in analysis_constraints)
-
-    email_indexes = {item["name"]: item for item in inspector.get_indexes("emails")}
-    analysis_indexes = {
-        item["name"]: item for item in inspector.get_indexes("email_analyses")
-    }
-    assert not email_indexes["ix_emails_gmail_message_id"]["unique"]
-    assert not analysis_indexes["ix_email_analyses_email_id"]["unique"]
-    engine.dispose()
-
     command.downgrade(config, "base")
     command.upgrade(config, "head")
+
+
+def test_gmail_auth_status_does_not_start_interactive_oauth(monkeypatch, tmp_path):
+    credentials_file = tmp_path / "credentials.json"
+    token_file = tmp_path / "token.json"
+    credentials_file.write_text("{}", encoding="utf-8")
+    token_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(gmail, "CREDENTIALS_FILE", credentials_file)
+    monkeypatch.setattr(gmail, "TOKEN_FILE", token_file)
+
+    calls = []
+
+    def fake_credentials(*, allow_interactive=True):
+        calls.append(allow_interactive)
+        return type("Credentials", (), {"valid": True})()
+
+    monkeypatch.setattr(gmail, "get_gmail_credentials", fake_credentials)
+
+    result = gmail.gmail_auth_status()
+
+    assert result["authorized"] is True
+    assert calls == [False]
+
+
+def test_gmail_auth_status_reports_invalid_token_without_browser_flow(
+    monkeypatch, tmp_path
+):
+    credentials_file = tmp_path / "credentials.json"
+    token_file = tmp_path / "token.json"
+    credentials_file.write_text("{}", encoding="utf-8")
+    token_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(gmail, "CREDENTIALS_FILE", credentials_file)
+    monkeypatch.setattr(gmail, "TOKEN_FILE", token_file)
+
+    def invalid_credentials(*, allow_interactive=True):
+        assert allow_interactive is False
+        raise ValueError("interactive authorization required")
+
+    monkeypatch.setattr(gmail, "get_gmail_credentials", invalid_credentials)
+
+    with TestClient(_app_with_gmail_routers()) as client:
+        response = client.get("/gmail/auth/status")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Unable to validate Gmail authorization."

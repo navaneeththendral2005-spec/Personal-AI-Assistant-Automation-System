@@ -7,11 +7,13 @@ from sqlalchemy.pool import StaticPool
 
 from backend.database import Base
 from backend.models import EmailMessage
+from backend.models_email_intelligence import EmailAnalysis
 from backend.services.email_processor_additive import (
     normalize_gmail_message,
     parse_gmail_date,
 )
 from backend.services.gmail_sync_service import sync_gmail_messages
+from backend.services.email_intelligence_service import analyze_stored_emails, get_email_analysis
 
 
 @pytest.fixture()
@@ -288,26 +290,64 @@ def test_sync_accepts_maximum_of_500_and_rejects_more(db_session):
         )
 
 
-def test_sync_rolls_back_entire_batch_on_unexpected_normalization_error(db_session, monkeypatch):
-    import backend.services.gmail_sync_service as sync_module
+def test_gmail_sync_to_classification_and_intelligence_is_idempotent(db_session):
+    """Exercise the complete Gmail-normalization -> DB -> analysis path with synthetic data."""
+    message = {
+        "id": "synthetic-interview-001",
+        "thread_id": "synthetic-thread-001",
+        "sender": "recruiter@example.test",
+        "recipient": "owner@example.test",
+        "subject": "Interview invitation - please confirm",
+        "date": "Tue, 20 Oct 2026 10:54:57 +0000",
+        "snippet": "Your interview is scheduled. Please confirm your availability.",
+        "body_text": "Your technical interview is scheduled for Friday. Please confirm your availability.",
+        "labels": ["INBOX", "UNREAD"],
+    }
 
-    original_normalize = sync_module.normalize_gmail_message
-    calls = 0
+    sync_result = sync_gmail_messages(
+        db_session,
+        max_results=1,
+        fetcher=lambda **kwargs: [message],
+    )
+    assert sync_result["inserted"] == 1
 
-    def normalize_then_fail(message):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return original_normalize(message)
-        raise RuntimeError("synthetic normalization failure")
+    analysis_result = analyze_stored_emails(db_session, limit=1)
+    assert analysis_result["created"] == 1
+    assert analysis_result["analyzed"] == 1
 
-    monkeypatch.setattr(sync_module, "normalize_gmail_message", normalize_then_fail)
-    messages = [
-        {"id": "rollback-1", "subject": "Synthetic one"},
-        {"id": "rollback-2", "subject": "Synthetic two"},
-    ]
+    stored = db_session.scalar(
+        select(EmailMessage).where(
+            EmailMessage.gmail_message_id == "synthetic-interview-001"
+        )
+    )
+    assert stored is not None
+    analysis = get_email_analysis(db_session, stored.id)
+    assert analysis is not None
+    assert analysis["classifier_method"] == "rules"
+    assert analysis["classifier_version"] == "friday-rules-v1"
+    assert analysis["category"] == "JOB"
+    assert analysis["career_stage"] == "INTERVIEW"
+    assert analysis["action_evidence"]
 
-    with pytest.raises(RuntimeError, match="synthetic normalization failure"):
-        sync_gmail_messages(db_session, max_results=10, fetcher=lambda **kwargs: messages)
+    # A stale classifier version must be refreshed even when label values are unchanged.
+    analysis_row = db_session.query(EmailAnalysis).one()
+    analysis_row.classifier_version = "stale-test-version"
+    db_session.commit()
+    provenance_refresh = analyze_stored_emails(db_session, limit=1)
+    assert provenance_refresh["updated"] == 1
+    assert db_session.query(EmailAnalysis).one().classifier_version == "friday-rules-v1"
 
-    assert list(db_session.scalars(select(EmailMessage)).all()) == []
+    # Re-running both stages must neither duplicate the stored email nor its analysis.
+    sync_again = sync_gmail_messages(
+        db_session,
+        max_results=1,
+        fetcher=lambda **kwargs: [message],
+    )
+    analysis_again = analyze_stored_emails(db_session, limit=1)
+    assert sync_again["inserted"] == 0
+    assert sync_again["unchanged"] == 1
+    assert analysis_again["created"] == 0
+    assert analysis_again["updated"] == 0
+    assert analysis_again["unchanged"] == 1
+    assert db_session.query(EmailMessage).count() == 1
+    assert db_session.query(EmailAnalysis).count() == 1

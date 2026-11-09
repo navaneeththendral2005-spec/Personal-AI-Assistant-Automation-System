@@ -1,4 +1,5 @@
 """Additive Gmail sync routes; existing /gmail endpoints are not replaced."""
+import logging
 from collections.abc import Generator
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -15,6 +16,7 @@ from backend.services.gmail_sync_service import (
     sync_gmail_messages,
 )
 
+logger = logging.getLogger("friday.gmail.sync")
 router = APIRouter(prefix="/gmail", tags=["Gmail Synchronization"])
 
 
@@ -47,7 +49,8 @@ def sync_gmail_endpoint(
             detail="Gmail synchronization failed while saving to the database; the batch was rolled back.",
         ) from exc
     except Exception as exc:
-        # Avoid returning Google/client internals or message content to callers.
+        # Provider exceptions can contain account metadata; log only the type.
+        logger.error("Gmail synchronization failed | error_type=%s", type(exc).__name__)
         raise HTTPException(
             status_code=502,
             detail="Unable to fetch Gmail messages. Check local logs for details.",

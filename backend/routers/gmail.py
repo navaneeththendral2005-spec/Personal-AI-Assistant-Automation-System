@@ -33,7 +33,7 @@ def gmail_auth_status():
         }
 
     try:
-        credentials = get_gmail_credentials()
+        credentials = get_gmail_credentials(allow_interactive=False)
 
         return {
             "authorized": credentials.valid,
