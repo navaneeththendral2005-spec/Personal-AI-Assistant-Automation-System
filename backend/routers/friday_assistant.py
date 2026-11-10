@@ -14,6 +14,7 @@ from backend.models import Task
 from backend.models_email_intelligence import EmailAnalysis
 from backend.services.email_intelligence_service import list_analyzed_emails
 from backend.services.assistant_query_service import answer_assistant_question
+from backend.services.email_response_tracking_service import list_unanswered_threads
 
 logger = logging.getLogger("friday.assistant")
 router = APIRouter(prefix="/assistant", tags=["FRIDAY Assistant"])
@@ -34,6 +35,7 @@ def daily_briefing(db: Session = Depends(get_db)):
         email_result = list_analyzed_emails(db, priority="URGENT", limit=10, offset=0)
         high_result = list_analyzed_emails(db, priority="HIGH", limit=10, offset=0)
         response_result = list_analyzed_emails(db, requires_response=True, limit=10, offset=0)
+        unanswered_result = list_unanswered_threads(db, limit=10)
         all_recent = list_analyzed_emails(db, limit=50, offset=0)["emails"]
         deadline_emails = [item for item in all_recent if item.get("detected_deadline") is not None]
         deadline_emails.sort(key=lambda item: item["detected_deadline"])
@@ -52,9 +54,11 @@ def daily_briefing(db: Session = Depends(get_db)):
             "urgent_emails": email_result["emails"],
             "high_priority_emails": high_result["emails"],
             "emails_may_need_response": response_result["emails"],
+            "unanswered_conversations": unanswered_result["threads"],
+            "unanswered_conversation_count": unanswered_result["total_unanswered_threads"],
             "emails_with_detected_deadlines": deadline_emails[:10],
             "pending_tasks": task_items,
-            "note": "Priority, response, and deadline items are heuristic suggestions based on stored metadata/snippets. Verify against the original email. This briefing does not create tasks or send messages.",
+            "note": "Priority, response, and deadline items are heuristic suggestions based on locally stored messages. Unanswered conversations are inferred from the latest stored message and Gmail SENT labels; incomplete synchronization can cause false positives. Verify against Gmail. This briefing does not create tasks or send messages.",
         }
     except SQLAlchemyError as exc:
         logger.exception("Daily briefing failed")

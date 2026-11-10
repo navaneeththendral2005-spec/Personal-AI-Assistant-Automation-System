@@ -51,3 +51,12 @@ Historical test counts in earlier development documents refer to different snaps
 - Added an explicit on-demand hybrid classification preview endpoint. It returns rules output and a separately labeled Ollama suggestion without persisting either preview result or changing stored labels.
 - Documented the semantic mismatch between runtime urgency (`LOW|NORMAL|HIGH|URGENT`) and experimental actionability (`URGENT|NEEDS_REPLY|INFORMATIONAL|SPAM`); no automatic mapping or model promotion is performed.
 - Kept the existing offline ML pipeline development-only because prior controlled evaluation did not establish a reliable improvement.
+
+## 2026-11-10 — Phase 3 email intelligence (Features 1–3)
+
+- Extended inbox summary responses with structured per-email summaries and stored analysis signals while preserving the existing digest contract.
+- Improved local natural-language email search ranking across subject, sender, snippet, and full stored body text; exposed evidence relevance scores.
+- Added read-only, thread-aware unanswered-conversation detection using Gmail `SENT` labels and existing response analysis.
+- Added `GET /gmail/intelligence/unanswered` and unanswered-conversation support in assistant chat and daily briefing.
+- No database schema changes or migrations.
+- Added regression tests in `tests/test_phase3_email_enhancements.py`.

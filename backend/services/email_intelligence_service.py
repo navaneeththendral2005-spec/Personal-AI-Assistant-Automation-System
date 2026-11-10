@@ -526,6 +526,30 @@ def summarize_inbox(db: Session, limit: int = 10, use_ai: bool = True) -> dict[s
             # Fail closed to a transparent local summary.
             provider = "local_fallback"
     body_count = sum(bool((email.body_text or "").strip()) for email in selected)
+    # Expose per-message evidence alongside the narrative digest. Consumers such
+    # as the dashboard and voice layer can present concise cards without parsing
+    # the human-readable summary string.
+    email_summaries = []
+    for email in selected:
+        analysis = db.query(EmailAnalysis).filter(EmailAnalysis.email_id == email.id).one_or_none()
+        classification = _analysis_payload(analysis, email) if analysis else classify_email(email)
+        details = _opportunity_details(email)
+        email_summaries.append({
+            "email_id": email.id,
+            "gmail_message_id": email.gmail_message_id,
+            "thread_id": email.thread_id,
+            "subject": email.subject or "(no subject)",
+            "sender": email.sender or "unknown sender",
+            "message_date": email.message_date.isoformat() if email.message_date else None,
+            "summary": _local_email_summary(email, max_chars=420),
+            "content_source": "body_text" if (email.body_text or "").strip() else "snippet",
+            "priority": classification.get("priority") if classification else None,
+            "category": classification.get("category") if classification else None,
+            "requires_response": classification.get("requires_response") if classification else None,
+            "detected_deadline": classification.get("detected_deadline").isoformat() if classification and classification.get("detected_deadline") else None,
+            "detected_actions": classification.get("detected_actions", []) if classification else [],
+            "opportunity_details": details,
+        })
     return {
         "summary": summary,
         "provider": provider,
@@ -533,7 +557,9 @@ def summarize_inbox(db: Session, limit: int = 10, use_ai: bool = True) -> dict[s
         "uses_full_bodies": body_count > 0,
         "emails_with_body": body_count,
         "content_source": "full_body_and_snippet_fallback" if body_count else "snippets_only",
+        "email_summaries": email_summaries,
         "attachments_accessed": False,
+        "read_only": True,
     }
 
 
@@ -564,11 +590,37 @@ def answer_inbox_question(db: Session, question: str, limit: int = 20) -> dict[s
                 EmailMessage.body_text.ilike(pattern),
             ))
         query = query.filter(or_(*clauses))
-    emails = (
-        query.order_by(EmailMessage.message_date.desc(), EmailMessage.id.desc())
-        .limit(min(limit, _ANSWER_EMAIL_LIMIT))
-        .all()
-    )
+    candidates = query.order_by(EmailMessage.message_date.desc(), EmailMessage.id.desc()).limit(500).all()
+
+    def relevance(email: EmailMessage) -> tuple[int, int]:
+        subject = (email.subject or "").lower()
+        sender = (email.sender or "").lower()
+        snippet = (email.snippet or "").lower()
+        body = (email.body_text or "").lower()
+        score = 0
+        matched = 0
+        for word in keywords[:12]:
+            in_subject, in_sender = word in subject, word in sender
+            in_snippet, in_body = word in snippet, word in body
+            if in_subject or in_sender or in_snippet or in_body:
+                matched += 1
+            score += (5 if in_subject else 0) + (3 if in_sender else 0) + (2 if in_snippet else 0) + (1 if in_body else 0)
+        if term and len(term) > 4:
+            if term in subject: score += 8
+            elif term in body or term in snippet: score += 4
+        return score, matched
+
+    def message_timestamp(email: EmailMessage) -> float:
+        value = email.message_date
+        if value is None:
+            return float("-inf")
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.timestamp()
+
+    ranked = [(relevance(email), email) for email in candidates]
+    ranked.sort(key=lambda item: (item[0][0], item[0][1], message_timestamp(item[1]), item[1].id), reverse=True)
+    emails = [email for (score, matched), email in ranked if not keywords or matched > 0][:min(limit, _ANSWER_EMAIL_LIMIT)]
 
     # If a keyword search finds no matches, don't silently answer from unrelated
     # recent mail; report insufficient evidence instead.
@@ -597,6 +649,7 @@ def answer_inbox_question(db: Session, question: str, limit: int = 20) -> dict[s
         "evidence": [
             {
                 "email_id": email.id,
+                "relevance_score": relevance(email)[0],
                 "subject": email.subject,
                 "sender": email.sender,
                 "message_date": email.message_date.isoformat() if email.message_date else None,

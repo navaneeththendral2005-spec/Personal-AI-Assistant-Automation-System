@@ -18,6 +18,7 @@ from backend.services.email_intelligence_service import (
     list_analyzed_emails,
     summarize_inbox,
 )
+from backend.services.email_response_tracking_service import list_unanswered_threads
 
 logger = logging.getLogger("friday.email_intelligence")
 router = APIRouter(prefix="/gmail/intelligence", tags=["Email Intelligence"])
@@ -116,6 +117,24 @@ def inbox_summary(limit: int = Query(default=10, ge=1, le=50), use_ai: bool = Tr
     except SQLAlchemyError as exc:
         logger.exception("Inbox summary failed")
         raise HTTPException(status_code=500, detail="Unable to summarize stored emails.") from exc
+
+
+@router.get("/unanswered")
+def unanswered_threads(
+    limit: int = Query(default=50, ge=1, le=200),
+    min_response_confidence: int = Query(default=0, ge=0, le=100),
+    db: Session = Depends(get_db),
+):
+    """List locally stored threads whose latest message may need the user's reply."""
+    try:
+        return list_unanswered_threads(
+            db, limit=limit, min_response_confidence=min_response_confidence
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SQLAlchemyError as exc:
+        logger.exception("Unanswered-thread detection failed")
+        raise HTTPException(status_code=500, detail="Unable to detect unanswered conversations.") from exc
 
 
 @router.post("/ask")

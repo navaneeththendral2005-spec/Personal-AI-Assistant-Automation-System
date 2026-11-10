@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from backend.models import EmailMessage, Task
 from backend.models_email_intelligence import EmailAnalysis
 from backend.services.email_classifier import classify_email
+from backend.services.email_response_tracking_service import list_unanswered_threads
 
 STOPWORDS = {
     "which", "what", "when", "where", "show", "tell", "me", "about", "the", "and", "for", "from", "that", "this", "are", "is", "was", "were", "have", "has", "had", "with", "into", "your", "my", "you", "should", "could", "would", "please", "emails", "email", "messages", "ones", "those", "them", "there", "their", "does", "do", "did", "can", "i", "we", "to", "of", "on", "in", "a", "an", "be", "it", "its", "recent", "stored", "find", "search", "list", "all", "any", "up", "next", "are",
@@ -41,7 +42,7 @@ def _to_aware(value: datetime | None) -> datetime | None:
 
 
 def _email_text(email: EmailMessage, analysis: EmailAnalysis | None) -> str:
-    parts = [email.sender, email.recipient, email.subject, email.snippet, " ".join(email.labels or [])]
+    parts = [email.sender, email.recipient, email.subject, email.snippet, email.body_text, " ".join(email.labels or [])]
     if analysis:
         parts.extend([analysis.category, analysis.priority, analysis.classification_reason,
                       " ".join(analysis.detected_actions or []), analysis.summary,
@@ -73,6 +74,8 @@ def _detect_intent(question: str) -> str:
         return "internships"
     if any(x in q for x in ("urgent", "urgently", "high priority", "important emails", "critical emails")):
         return "urgent"
+    if any(x in q for x in ("unanswered", "awaiting my reply", "waiting for my reply", "waiting to reply", "need to reply", "not replied", "haven't replied", "have not replied", "emails i need to reply", "conversations i need to answer")):
+        return "unanswered"
     if any(x in q for x in ("need a response", "needs a reply", "need to reply", "should i reply", "respond to", "awaiting my response")):
         return "response"
     if any(x in q for x in ("follow up", "follow-up", "followup", "apply", "application", "job opportunity", "job opportunities", "job alert", "career opportunity", "careers", "recruiter", "shortlisted")):
@@ -108,6 +111,8 @@ def _payload(email: EmailMessage, analysis: EmailAnalysis | None) -> dict[str, A
         "subject": email.subject or "(no subject)", "sender": email.sender or "unknown sender",
         "recipient": email.recipient, "message_date": email.message_date.isoformat() if email.message_date else None,
         "snippet": email.snippet or "", "labels": email.labels or [], "category": category,
+        "content_source": "body_text" if (email.body_text or "").strip() else "snippet_or_metadata",
+        "evidence_excerpt": re.sub(r"\s+", " ", email.body_text or email.snippet or "")[:500],
         "priority": priority, "priority_score": score,
         "confidence_score": analysis.confidence_score if analysis else fallback.get("confidence_score", 50),
         "response_confidence": analysis.response_confidence if analysis else fallback.get("response_confidence", 0),
@@ -161,6 +166,30 @@ def answer_assistant_question(
                 prior_ids = [int(v) for v in item["evidence_ids"] if str(v).isdigit()]
                 if prior_ids:
                     break
+
+    if effective_intent == "unanswered":
+        thread_result = list_unanswered_threads(db, limit=limit, now=now_utc)
+        evidence = thread_result["threads"]
+        answer = (
+            f"I found {len(evidence)} conversation(s) that may still need your reply in FRIDAY's stored messages."
+            if evidence else "I couldn't identify any stored conversations that clearly still need your reply."
+        )
+        if evidence:
+            answer += "\n" + "\n".join(
+                f"- {item['subject']} — latest message from {item['sender']}"
+                + (f", waiting about {item['waiting_hours']} hour(s)" if item.get("waiting_hours") is not None else "")
+                for item in evidence
+            )
+        answer += "\nThis is based on synchronized messages only; verify each conversation in Gmail."
+        return {
+            "question": question, "intent": "unanswered", "answer": answer,
+            "evidence": evidence, "evidence_ids": [item["latest_email_id"] for item in evidence],
+            "matched_count": len(evidence), "matched_emails": len(evidence), "matched_tasks": 0,
+            "provider": "local_thread_analysis", "is_follow_up": is_followup,
+            "write_actions_taken": False, "searched_records": thread_result["total_unanswered_threads"],
+            "scope": thread_result["scope"], "complete_thread_guarantee": thread_result["complete_thread_guarantee"],
+            "note": thread_result["note"],
+        }
 
     if effective_intent in ("tasks", "overdue_tasks"):
         tasks = (db.query(Task).filter(Task.is_completed.is_(False))
@@ -335,16 +364,16 @@ def answer_assistant_question(
             answer += f"\n{i}. {item['subject']} — {item['sender']} ({item['category']} / {item['priority']}). Why it matched: {item['why_matched']}."
             if item.get("detected_deadline"):
                 answer += f" Detected deadline: {item['detected_deadline']} (verify against the original email)."
-        answer += "\nThese matches use stored sender, subject, snippet, labels, and analysis metadata; full email bodies and attachments are not searched unless separately retrieved."
+        answer += "\nThese matches use locally stored sender, subject, snippet, full body text, labels, and analysis metadata. Attachments and live Gmail are not searched."
     else:
         if effective_intent == "interviews":
-            detail = "No interview-related wording was found in the stored sender, subject, snippets, labels, or analysis metadata."
+            detail = "No interview-related wording was found in the locally stored sender, subject, snippet, body text, labels, or analysis metadata."
         elif effective_intent == "deadlines":
             detail = "No stored emails matched the deadline criteria in the fields FRIDAY can search."
         else:
             detail = f"No stored email matched the {effective_intent.replace('_', ' ')} query."
         answer = (f"I searched {len(rows)} stored email record(s). {detail} This does not prove Gmail contains no such message; it does not mean your Gmail inbox has no such messages: "
-                  "full email bodies and live Gmail were not searched. Try syncing more recent messages or analyzing stored emails.")
+                  "attachments and live Gmail were not searched. Try syncing more messages or analyzing stored emails.")
 
     return {"question": question, "intent": effective_intent, "answer": answer, "evidence": evidence,
             "evidence_ids": [x["email_id"] for x in evidence], "matched_count": len(evidence),
