@@ -231,7 +231,7 @@ def classify_with_fallback(
         rules = dict(rules_classifier(row))
         rules.update({
             "classifier_method": "rules_fallback",
-            "classifier_version": str(rules.get("classifier_version", "friday-rules-v1")),
+            "classifier_version": str(rules.get("classifier_version", "friday-rules-v2")),
             "fallback_reason": type(exc).__name__,
             "latency_ms": 0.0,
         })

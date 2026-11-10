@@ -30,11 +30,16 @@ def test_sync_and_analyze_route_connects_sync_then_analysis(monkeypatch):
         calls.append(("sync", max_results))
         return {"status": "success", "inserted": 2}
 
+    def fake_history(db, *, max_threads):
+        calls.append(("history", max_threads))
+        return {"status": "success", "remaining_unverified_threads": 0}
+
     def fake_analyze(db, *, limit):
         calls.append(("analyze", limit))
         return {"status": "success", "analyzed": 2}
 
     monkeypatch.setattr("backend.services.gmail_sync_service.sync_gmail_messages", fake_sync)
+    monkeypatch.setattr("backend.services.gmail_sync_service.sync_stored_thread_histories", fake_history)
     monkeypatch.setattr(gmail_intelligence, "analyze_stored_emails", fake_analyze)
 
     with TestClient(_app_with_gmail_routers()) as client:
@@ -43,9 +48,10 @@ def test_sync_and_analyze_route_connects_sync_then_analysis(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "sync": {"status": "success", "inserted": 2},
+        "thread_history": {"status": "success", "remaining_unverified_threads": 0},
         "analysis": {"status": "success", "analyzed": 2},
     }
-    assert calls == [("sync", 2), ("analyze", 2)]
+    assert calls == [("sync", 2), ("history", 50), ("analyze", 500)]
 
 
 def test_sync_and_analyze_returns_safe_error_without_provider_details(monkeypatch, caplog):

@@ -41,11 +41,13 @@ URGENT_TERMS = (
     "overdue payment", "account will be closed", "urgent action required",
 )
 HIGH_TERMS = (
-    "interview invitation", "interview scheduled", "shortlisted", "offer letter",
+    "interview invitation", "interview scheduled", "you have been shortlisted", "shortlisted for",
+    "offer letter", "pleased to offer", "job offer",
     "application deadline", "deadline", "due today", "action required", "please respond",
     "meeting invitation", "payment due", "bill due", "invoice due", "respond by",
     "assessment scheduled", "complete your application", "document submission",
-    "confirm your attendance", "interview details",
+    "confirm your attendance", "interview details", "closes ", "closing date",
+    "registration closes", "applications close",
 )
 RESPONSE_TERMS = (
     "please reply", "please respond", "let me know", "confirm your", "respond by",
@@ -138,8 +140,8 @@ def detect_deadline(text: str, now: datetime | None = None) -> datetime | None:
     # A date is not automatically a deadline. Require a nearby semantic cue.
     deadline_context = re.search(
         r"\b(deadline|due|by|before|no later than|submit|submission|apply|application closes?|"
-        r"closing date|last date|expires?|expiry|complete(?:d)? by|pay by|respond by|"
-        r"register by|book by|confirm by|ends? on|must be received|within)\b",
+        r"closing date|last date|expires?|expiry|complete(?:d)? by|pay by|respond by|closes?|closing|"
+        r"register by|book by|confirm by|ends? on|closes? on|must be received|within)\b",
         lowered,
     )
     relative_context = re.search(
@@ -230,8 +232,26 @@ def _make_summary(subject: str, snippet: str) -> str:
     return f"{clean_subject}: {clean_snippet}"[:500]
 
 
-def _response_signal(text: str) -> tuple[bool, int, str]:
-    """Detect explicit response requests while suppressing common no-reply notices."""
+def _automated_sender(sender: str) -> bool:
+    """Return True for sender addresses that are not reasonable reply targets."""
+    value = str(sender or "").lower()
+    address_match = re.search(r"<([^>]+)>", value)
+    address = address_match.group(1) if address_match else value
+    local_part = address.split("@", 1)[0]
+    return bool(re.search(
+        r"(?:^|[._+-])(no[-_.]?reply|do[-_.]?not[-_.]?reply|mailer[-_.]?daemon|notifications?|automated|newsletter|alerts?)(?:$|[._+-])",
+        local_part,
+    ))
+
+
+def _response_signal(text: str, sender: str = "", category: str = "OTHER") -> tuple[bool, int, str]:
+    """Detect reply requests while suppressing automated, promotional and generic notices."""
+    if _automated_sender(sender):
+        return False, 0, "Automated/no-reply sender is not treated as a human response request."
+    if category in {"PROMOTIONS", "UPDATES"}:
+        # A broad phrase such as 'please review your account' in a system alert or
+        # marketing footer is not sufficient evidence that the user should reply.
+        return False, 0, f"{category.lower()} messages are not treated as reply requests without a human sender signal."
     negative_patterns = (
         r"\bno reply (?:is )?needed\b", r"\bno response (?:is )?required\b",
         r"\bdo not reply\b", r"\bdon't reply\b", r"\bno need to respond\b",
@@ -247,7 +267,7 @@ def _response_signal(text: str) -> tuple[bool, int, str]:
     matched = next((term for term in direct if term in text), None)
     if matched:
         return True, 90, f"Explicit response request: '{matched}'."
-    weaker = ("any update on my application", "following up on", "could you share", "please review")
+    weaker = ("any update on my application", "following up on", "could you share")
     matched = next((term for term in weaker if term in text), None)
     if matched:
         return True, 68, f"Possible response/follow-up request: '{matched}'."
@@ -347,11 +367,27 @@ def classify_email(message: Any) -> dict[str, Any]:
     if not any(category_scores.values()):
         category_scores["OTHER"] = 1
     category = max(CATEGORIES, key=lambda name: (category_scores[name], -CATEGORIES.index(name)))
+    # Competitions and hackathons can contain words such as "opportunity",
+    # "challenge", and "deadline" without being employment/job messages.
+    competition_notice = any(term in text for term in (
+        "hackquest", "hackathon", "coding competition", "coding contest",
+        "programming contest", "student competition", "ethical hacker challenge",
+        "innovation challenge", "quiz competition",
+    ))
+    concrete_hiring_event = any(term in text for term in (
+        "interview invitation", "interview scheduled", "shortlisted for",
+        "offer letter", "job offer", "employment offer", "recruiter call",
+    ))
+    if competition_notice and not concrete_hiring_event:
+        category = "OTHER"
+        category_scores["OTHER"] = max(category_scores["OTHER"], 3)
     winning_score = category_scores[category]
     runner_up = max((score for name, score in category_scores.items() if name != category), default=0)
     category_margin = max(0, winning_score - runner_up)
     category_confidence = min(96, 45 + winning_score * 4 + category_margin * 2) if winning_score else 35
     category_reason = (
+        "Competition or hackathon announcement classified separately from employment opportunities."
+        if competition_notice and not concrete_hiring_event else
         f"Matched {category.lower()} signals in sender, subject, body, snippet, or Gmail labels (signal score {winning_score})."
         if winning_score else "No strong category signals; classified as OTHER."
     )
@@ -360,12 +396,32 @@ def classify_email(message: Any) -> dict[str, Any]:
     high_match = next((term for term in HIGH_TERMS if term in text), None)
     action_match = next((term for term in ACTION_TERMS if term in text), None)
     unread = "UNREAD" in labels
-    job_interview = any(term in text for term in ("interview", "technical round", "hr round", "assessment scheduled", "screening call", "recruiter call"))
+    # Mentioning interview preparation is not the same as receiving an interview.
+    # Only concrete hiring-stage events should elevate a job email automatically.
+    job_interview = any(term in text for term in (
+        "interview invitation", "invited to interview", "invite you to interview",
+        "interview has been scheduled", "interview scheduled", "technical interview",
+        "hr interview", "screening call scheduled", "assessment scheduled",
+        "confirm your interview", "interview slot", "interview details",
+    ))
     payment_signal = any(term in text for term in ("payment due", "invoice due", "bill due", "payment overdue", "amount due"))
-    requires_response, response_confidence, response_reason = _response_signal(text)
-    if urgent_match:
+    requires_response, response_confidence, response_reason = _response_signal(text, sender, category)
+    trusted_promo_urgent = {
+        "account suspended", "fraud alert", "security breach",
+        "account will be closed", "service will be suspended",
+    }
+    priority_urgent_match = urgent_match
+    if category == "PROMOTIONS" and urgent_match not in trusted_promo_urgent:
+        priority_urgent_match = None
+    # Promotional copy often contains phrases such as "last chance", "limited time",
+    # or generic action wording. Keep it low priority unless a genuine security/account
+    # risk is detected; marketing urgency is not user urgency.
+    if category == "PROMOTIONS" and not priority_urgent_match and not (requires_response and response_confidence >= 85):
+        score, priority, priority_confidence = 10, "LOW", 80
+        priority_reason = "Promotional message suppressed from high priority absent a genuine urgent or human reply signal."
+    elif priority_urgent_match:
         score, priority, priority_confidence = 95, "URGENT", 92
-        priority_reason = f"Urgent signal: '{urgent_match}'."
+        priority_reason = f"Urgent signal: '{priority_urgent_match}'."
     elif high_match or job_interview or (payment_signal and unread):
         score, priority, priority_confidence = 78, "HIGH", 84
         priority_reason = (
@@ -406,9 +462,12 @@ def classify_email(message: Any) -> dict[str, Any]:
 
     action_evidence = _action_evidence(text, actions)
     career_signal, career_stage, career_confidence, career_evidence = _career_signals(text, sender)
+    if competition_notice and not concrete_hiring_event:
+        career_signal, career_stage, career_confidence = False, "NONE", 0
+        career_evidence = ["COMPETITION_OR_SKILLS_CHALLENGE_NOT_EMPLOYMENT"]
     deadline = detect_deadline(text)
     deadline_type, deadline_confidence = _deadline_type(text, deadline)
-    confidence_score = min(98, round(category_confidence * 0.55 + (75 if high_match or urgent_match else 55) * 0.25 + (response_confidence if requires_response else 55) * 0.20))
+    confidence_score = min(98, round(category_confidence * 0.55 + (75 if high_match or priority_urgent_match else 55) * 0.25 + (response_confidence if requires_response else 55) * 0.20))
     reasons = [category_reason, priority_reason, response_reason]
     if requires_response:
         reasons.append("Likely requires a reply or confirmation; verify the original email.")

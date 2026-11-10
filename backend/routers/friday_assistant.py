@@ -36,6 +36,29 @@ def daily_briefing(db: Session = Depends(get_db)):
         high_result = list_analyzed_emails(db, priority="HIGH", limit=10, offset=0)
         response_result = list_analyzed_emails(db, requires_response=True, limit=10, offset=0)
         unanswered_result = list_unanswered_threads(db, limit=10)
+        # Keep marketing and routine update traffic out of the attention queue.
+        # URGENT system/security alerts remain visible; promotional messages do
+        # not become important merely because their copy contains "last chance".
+        urgent_emails = [
+            item for item in email_result["emails"]
+            if item.get("category") not in {"PROMOTIONS"}
+        ]
+        high_priority_emails = [
+            item for item in high_result["emails"]
+            if item.get("category") not in {"PROMOTIONS", "UPDATES"}
+            # Broad opportunity/application notices are useful, but should not
+            # crowd the attention queue unless they contain a concrete next step.
+            and not (
+                item.get("category") == "JOB"
+                and item.get("career_stage") in {"OPPORTUNITY", "POSSIBLE_OPPORTUNITY", "APPLICATION"}
+                and not item.get("requires_response")
+                and not item.get("detected_deadline")
+            )
+        ]
+        response_needed_emails = [
+            item for item in response_result["emails"]
+            if item.get("category") not in {"PROMOTIONS", "UPDATES"}
+        ]
         all_recent = list_analyzed_emails(db, limit=50, offset=0)["emails"]
         deadline_emails = [item for item in all_recent if item.get("detected_deadline") is not None]
         deadline_emails.sort(key=lambda item: item["detected_deadline"])
@@ -51,9 +74,9 @@ def daily_briefing(db: Session = Depends(get_db)):
         return {
             "generated_at": now,
             "message": "Review urgent email signals first, then high-priority emails and pending tasks.",
-            "urgent_emails": email_result["emails"],
-            "high_priority_emails": high_result["emails"],
-            "emails_may_need_response": response_result["emails"],
+            "urgent_emails": urgent_emails,
+            "high_priority_emails": high_priority_emails,
+            "emails_may_need_response": response_needed_emails,
             "unanswered_conversations": unanswered_result["threads"],
             "unanswered_conversation_count": unanswered_result["total_unanswered_threads"],
             "emails_with_detected_deadlines": deadline_emails[:10],

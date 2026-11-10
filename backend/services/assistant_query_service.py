@@ -42,20 +42,21 @@ def _to_aware(value: datetime | None) -> datetime | None:
 
 
 def _email_text(email: EmailMessage, analysis: EmailAnalysis | None) -> str:
-    parts = [email.sender, email.recipient, email.subject, email.snippet, email.body_text, " ".join(email.labels or [])]
-    if analysis:
-        parts.extend([analysis.category, analysis.priority, analysis.classification_reason,
-                      " ".join(analysis.detected_actions or []), analysis.summary,
-                      analysis.career_stage, " ".join(analysis.career_evidence or [])])
-    else:
-        fallback = classify_email(email)
-        parts.extend([fallback.get("category"), fallback.get("priority"), fallback.get("classification_reason"),
-                      " ".join(fallback.get("detected_actions", []))])
-    return _normal(" ".join(str(x or "") for x in parts))
+    """Search source email content only; classifier explanations must not self-match."""
+    parts = [email.sender, email.recipient, email.subject, email.snippet, email.body_text]
+    return _normal(" ".join(str(value or "") for value in parts))
 
 
 def _detect_intent(question: str) -> str:
     q = _normal(question)
+    # Compound career-action questions can mention assessment deadlines; resolve
+    # them before the generic deadline intent so all requested facets are searched.
+    if (
+        any(term in q for term in ("interview", "interviews"))
+        and any(term in q for term in ("recruiter", "job", "jobs", "career"))
+        and any(term in q for term in ("assessment", "deadline", "request", "invitation"))
+    ):
+        return "career"
     if any(x in q for x in ("overdue task", "overdue tasks", "tasks overdue", "past due task", "what tasks are overdue", "task is overdue")):
         return "overdue_tasks"
     if any(x in q for x in ("task", "todo", "to-do", "reminder", "what should i do", "my schedule")):
@@ -64,10 +65,13 @@ def _detect_intent(question: str) -> str:
         return "deadlines"
     if any(x in q for x in ("deadline", "deadlines", "due date", "due dates", "expires", "closing date", "last date")):
         return "deadlines"
-    if any(x in q for x in ("interview", "interviews", "screening call", "technical round", "hr round")):
-        return "interviews"
+    asks_interviews = any(x in q for x in ("interview", "interviews", "screening call", "technical round", "hr round", "assessment"))
     has_internship = any(x in q for x in ("internship", "internships", "intern role", "intern position"))
-    has_job = any(x in q for x in ("job", "jobs", "job opportunity", "job opportunities", "career opportunity", "career opportunities"))
+    has_job = any(x in q for x in ("job", "jobs", "job opportunity", "job opportunities", "career opportunity", "career opportunities", "recruiter"))
+    if asks_interviews and (has_internship or has_job):
+        return "career"
+    if asks_interviews:
+        return "interviews"
     if has_internship and has_job:
         return "career"
     if has_internship:
@@ -232,21 +236,117 @@ def answer_assistant_question(
 
         if effective_intent == "interviews":
             matched = [t for t in INTENT_TERMS["interviews"] if t in text]
+            # Generic promotional copy may mention interview preparation; do not
+            # treat it as an actual interview thread unless the subject/body has a
+            # concrete interview or assessment event signal.
+            concrete_interview = any(t in text for t in (
+                "interview invitation", "interview scheduled", "technical interview",
+                "hr interview", "screening call", "assessment scheduled", "interview details",
+                "confirm your interview", "interview on ", "interview slot",
+            ))
+            if category == "PROMOTIONS" and not concrete_interview:
+                continue
             if not matched: continue
-            score += 8 + min(len(matched), 3) * 2
+            score += 10 + min(len(matched), 3) * 2
+            if concrete_interview:
+                score += 8
+            if email.subject and any(t in email.subject.lower() for t in ("interview", "assessment", "screening")):
+                score += 8
             reasons.append("interview-related wording: " + ", ".join(matched[:3]))
         elif effective_intent in ("internships", "opportunities", "career", "jobs"):
+            # When a user names concrete hiring-stage events, do not let broad
+            # career vocabulary (e.g. interview-preparation courses or job digests)
+            # satisfy the query. Treat each requested facet as its own evidence gate.
+            asks_interview_invitation = any(term in q for term in (
+                "interview invitation", "interview invitations", "interview invite", "interview invites",
+            ))
+            asks_assessment_deadline = (
+                "assessment" in q and any(term in q for term in ("deadline", "deadlines", "due", "by "))
+            )
+            asks_recruiter_request = (
+                "recruiter" in q and any(term in q for term in ("request", "requests", "need my attention", "reply", "respond", "confirm"))
+            )
+            if asks_interview_invitation or asks_assessment_deadline or asks_recruiter_request:
+                invitation_evidence = any(term in text for term in (
+                    "interview invitation", "invited to interview", "invite you to interview",
+                    "invite you to a technical interview", "invite you to a hr interview",
+                    "interview has been scheduled", "interview scheduled", "schedule your interview",
+                    "confirm your interview", "interview slot", "interview details", "shortlisted for interview",
+                ))
+                assessment_evidence = (
+                    "assessment" in text or "coding test" in text or "technical test" in text
+                ) and (
+                    bool(deadline) or any(term in text for term in (
+                        "assessment deadline", "complete the assessment by", "submit the assessment by",
+                        "complete your assessment before", "assessment is due", "assessment must be completed by",
+                    ))
+                )
+                recruiter_sender = any(term in _normal(email.sender) for term in (
+                    "recruit", "talent", "human.resources", "hr@", "careers@",
+                ))
+                explicit_reply_request = bool(requires_response) or any(term in text for term in (
+                    "please reply", "please respond", "confirm your availability", "confirm your attendance",
+                    "please confirm", "respond by", "reply to this email", "awaiting your response",
+                    "kindly respond", "please get back to me", "let me know",
+                ))
+                recruiter_request_evidence = recruiter_sender and explicit_reply_request
+                facet_matches = []
+                if asks_interview_invitation and invitation_evidence:
+                    facet_matches.append("interview invitation")
+                    score += 24
+                if asks_assessment_deadline and assessment_evidence:
+                    facet_matches.append("assessment with deadline evidence")
+                    score += 22
+                if asks_recruiter_request and recruiter_request_evidence:
+                    facet_matches.append("recruiter response request")
+                    score += 22
+                if not facet_matches:
+                    continue
+                if category in ("PROMOTIONS", "UPDATES"):
+                    continue
+                reasons.append("specific evidence: " + ", ".join(facet_matches))
+                if deadline:
+                    score += 8
+                if email.subject and any(term in email.subject.lower() for term in ("interview", "assessment", "confirm")):
+                    score += 5
+                candidates.append((score, email, analysis, reasons))
+                continue
+
             intern_match = any(t in text for t in INTENT_TERMS["internships"])
-            job_match = any(t in text for t in INTENT_TERMS["jobs"]) or category == "JOB"
+            interview_match = any(t in text for t in INTENT_TERMS["interviews"])
+            assessment_match = any(t in text for t in ("assessment", "coding test", "technical test", "online test"))
+            # Avoid weak words such as 'application' or 'offer' alone creating a
+            # career hit. A category label can support, but never replace, content.
+            strong_job_terms = (
+                "job opening", "job opportunity", "job alert", "career opportunity",
+                "recruiter", "hiring", "vacancy", "graduate trainee", "shortlisted",
+                "offer letter", "employment opportunity", "placement drive",
+            )
+            job_match = any(term in text for term in strong_job_terms) or (category == "JOB" and bool(analysis and analysis.career_signal))
             stored_career_signal = bool(analysis and getattr(analysis, "career_signal", False))
-            if effective_intent == "internships" and not (intern_match or (category == "JOB" and "intern" in text)): continue
-            if effective_intent == "jobs" and not job_match: continue
-            if effective_intent in ("opportunities", "career") and not (intern_match or job_match or stored_career_signal): continue
-            score += (8 if intern_match else 6) + (min(sum(t in text for t in INTENT_TERMS["jobs"]), 4) * 2)
+            concrete_interview = any(term in text for term in (
+                "interview invitation", "interview scheduled", "technical interview",
+                "hr interview", "screening call", "assessment scheduled",
+                "confirm your interview", "interview details", "interview slot",
+            ))
+            concrete_career = intern_match or job_match or interview_match or assessment_match
+            # Marketing for interview courses/preparation is not a job opportunity.
+            if category == "PROMOTIONS" and not (intern_match or job_match or assessment_match or concrete_interview):
+                continue
+            if effective_intent == "internships" and not intern_match:
+                continue
+            if effective_intent == "jobs" and not (job_match or interview_match or assessment_match):
+                continue
+            if effective_intent in ("opportunities", "career") and not concrete_career:
+                continue
+            score += (10 if intern_match else 0) + (8 if job_match else 0)
+            score += (8 if interview_match else 0) + (6 if assessment_match else 0)
+            if email.subject and any(term in email.subject.lower() for term in strong_job_terms + ("internship", "interview", "assessment")):
+                score += 8
             if stored_career_signal:
                 score += min(int(analysis.career_confidence or 0) // 30, 3)
                 reasons.append(f"career-stage signal: {analysis.career_stage} (heuristic confidence {analysis.career_confidence}/100)")
-            reasons.append("job or internship opportunity wording" if effective_intent in ("opportunities", "career") else ("internship-related wording" if effective_intent == "internships" else "job or hiring-related wording"))
+            reasons.append("job, internship, interview, or assessment wording in message content")
         elif effective_intent == "deadlines":
             deadline_aware = (
             _to_aware(deadline)
@@ -309,10 +409,14 @@ def answer_assistant_question(
             else:
                 continue
         elif effective_intent == "urgent" or filter_priority:
+            if category == "PROMOTIONS" and priority != "URGENT":
+                continue
             if priority not in ("HIGH", "URGENT") and int(priority_score or 0) < 70: continue
             score += int(priority_score or 0)
             reasons.append(f"priority signal: {priority}")
         elif effective_intent == "response":
+            if category in ("PROMOTIONS", "UPDATES"):
+                continue
             if not requires_response and not any(t in text for t in INTENT_TERMS["response"]): continue
             score += 8
             reasons.append("possible response or follow-up signal")
@@ -354,7 +458,7 @@ def answer_assistant_question(
 
     if evidence:
         labels = {"interviews": "interview-related", "internships": "internship opportunity",
-                  "opportunities": "job and internship opportunity", "career": "job and internship opportunity",
+                  "opportunities": "job, internship, interview, and assessment-related", "career": "job, internship, interview, and assessment-related",
                   "jobs": "job or career", "deadlines": "deadline-related", "urgent": "high-priority",
                   "response": "possible response-needed", "finance": "finance-related",
                   "promotions": "promotion-related", "recent": "recent"}
