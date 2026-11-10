@@ -92,3 +92,21 @@ class EmailMessage(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+class GmailThreadSyncState(Base):
+    """Tracks successful read-only verification of locally known Gmail threads."""
+
+    __tablename__ = "gmail_thread_sync_states"
+    __table_args__ = (UniqueConstraint("gmail_thread_id", name="uq_gmail_thread_sync_states_thread_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    gmail_thread_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    sync_status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING", index=True)
+    message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+    last_error_type: Mapped[str | None] = mapped_column(String(100), nullable=True)

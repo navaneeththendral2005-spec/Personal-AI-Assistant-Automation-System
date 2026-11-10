@@ -299,11 +299,34 @@ def get_email_by_id(message_id: str, *, service=None) -> dict[str, Any]:
     return _message_to_email(details, service)
 
 
+def get_thread_messages(thread_id: str, *, service=None) -> list[dict[str, Any]]:
+    """Fetch every currently available message in one Gmail thread (read-only)."""
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        raise ValueError("A valid Gmail thread ID is required.")
+    service = service or get_gmail_service()
+    response = service.users().threads().get(
+        userId="me", id=thread_id.strip(), format="full"
+    ).execute()
+    messages = response.get("messages", [])
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for details in messages:
+        if not isinstance(details, dict):
+            continue
+        message_id = str(details.get("id") or "")
+        if not message_id or message_id in seen:
+            continue
+        result.append(_message_to_email(details, service))
+        seen.add(message_id)
+    return result
+
+
 def list_emails_page(
     max_results: int = 50,
     page_token: str | None = None,
     *,
     service=None,
+    include_thread_history: bool = False,
 ) -> dict[str, Any]:
     """Fetch one Gmail messages page and its continuation token.
 
@@ -320,21 +343,47 @@ def list_emails_page(
         request_args["pageToken"] = page_token
     response = service.users().messages().list(**request_args).execute()
 
-    emails = []
-    for message in response.get("messages", []):
-        message_id = message.get("id") if isinstance(message, dict) else None
-        if not message_id:
-            continue
-        details = (
-            service.users().messages().get(
-                userId="me", id=message_id, format="full"
+    listed_messages = response.get("messages", [])
+    emails: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    if include_thread_history:
+        # A message-list page is not a complete conversation. Expand each
+        # distinct Gmail thread using the read-only threads.get endpoint so
+        # prior inbound/outbound messages can participate in reply detection.
+        thread_ids = list(dict.fromkeys(
+            str(item.get("threadId"))
+            for item in listed_messages
+            if isinstance(item, dict) and item.get("threadId")
+        ))
+        for thread_id in thread_ids:
+            thread = service.users().threads().get(
+                userId="me", id=thread_id, format="full"
             ).execute()
-        )
+            for details in thread.get("messages", []):
+                message_id = details.get("id") if isinstance(details, dict) else None
+                if not message_id or str(message_id) in seen_ids:
+                    continue
+                emails.append(_message_to_email(details, service))
+                seen_ids.add(str(message_id))
+
+    # Messages without a thread ID (or the legacy non-expanded path) are
+    # fetched individually. Keep the default behavior backwards compatible.
+    for message in listed_messages:
+        message_id = message.get("id") if isinstance(message, dict) else None
+        if not message_id or str(message_id) in seen_ids:
+            continue
+        details = service.users().messages().get(
+            userId="me", id=message_id, format="full"
+        ).execute()
         emails.append(_message_to_email(details, service))
+        seen_ids.add(str(message_id))
 
     return {
         "emails": emails,
         "next_page_token": response.get("nextPageToken"),
+        "listed_count": len(listed_messages),
+        "expanded_thread_history": bool(include_thread_history),
     }
 
 

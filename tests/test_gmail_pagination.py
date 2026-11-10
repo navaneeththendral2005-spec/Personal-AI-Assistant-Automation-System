@@ -15,8 +15,8 @@ class FakeMessages:
         self.list_calls = []
         self.get_calls = []
         self.pages = {
-            None: {"messages": [{"id": "msg-1"}], "nextPageToken": "next-1"},
-            "next-1": {"messages": [{"id": "msg-2"}]},
+            None: {"messages": [{"id": "msg-1", "threadId": "thread-1"}], "nextPageToken": "next-1"},
+            "next-1": {"messages": [{"id": "msg-2", "threadId": "thread-2"}]},
         }
         self.details = {
             "msg-1": {
@@ -53,12 +53,39 @@ class FakeMessages:
         return FakeRequest(self.details[kwargs["id"]])
 
 
+class FakeThreads:
+    def __init__(self, details):
+        self.details = details
+        self.get_calls = []
+
+    def get(self, **kwargs):
+        self.get_calls.append(kwargs)
+        return FakeRequest(self.details[kwargs["id"]])
+
+
 class FakeUsers:
     def __init__(self):
         self._messages = FakeMessages()
+        self._threads = FakeThreads({
+            "thread-1": {
+                "messages": [
+                    self._messages.details["msg-1"],
+                    {
+                        "id": "msg-old",
+                        "threadId": "thread-1",
+                        "snippet": "Older conversation message",
+                        "labelIds": ["SENT"],
+                        "payload": {"mimeType": "text/plain", "body": {"data": "SGVudCBhIHJlcGx5"}},
+                    },
+                ]
+            }
+        })
 
     def messages(self):
         return self._messages
+
+    def threads(self):
+        return self._threads
 
 
 class FakeGmailService:
@@ -95,3 +122,19 @@ def test_list_emails_keeps_list_return_shape_and_accepts_page_token():
 
     assert isinstance(emails, list)
     assert [email["id"] for email in emails] == ["msg-2"]
+
+
+
+def test_list_emails_page_can_expand_full_thread_history_read_only():
+    service = FakeGmailService()
+    result = list_emails_page(
+        max_results=50, service=service, include_thread_history=True
+    )
+
+    assert {email["id"] for email in result["emails"]} == {"msg-1", "msg-old"}
+    assert result["listed_count"] == 1
+    assert result["expanded_thread_history"] is True
+    assert service._users._threads.get_calls == [
+        {"userId": "me", "id": "thread-1", "format": "full"}
+    ]
+    assert service._users._messages.get_calls == []

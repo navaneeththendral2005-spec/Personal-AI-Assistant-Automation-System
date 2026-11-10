@@ -324,7 +324,7 @@ def test_gmail_sync_to_classification_and_intelligence_is_idempotent(db_session)
     analysis = get_email_analysis(db_session, stored.id)
     assert analysis is not None
     assert analysis["classifier_method"] == "rules"
-    assert analysis["classifier_version"] == "friday-rules-v1"
+    assert analysis["classifier_version"] == "friday-rules-v2"
     assert analysis["category"] == "JOB"
     assert analysis["career_stage"] == "INTERVIEW"
     assert analysis["action_evidence"]
@@ -335,7 +335,7 @@ def test_gmail_sync_to_classification_and_intelligence_is_idempotent(db_session)
     db_session.commit()
     provenance_refresh = analyze_stored_emails(db_session, limit=1)
     assert provenance_refresh["updated"] == 1
-    assert db_session.query(EmailAnalysis).one().classifier_version == "friday-rules-v1"
+    assert db_session.query(EmailAnalysis).one().classifier_version == "friday-rules-v2"
 
     # Re-running both stages must neither duplicate the stored email nor its analysis.
     sync_again = sync_gmail_messages(

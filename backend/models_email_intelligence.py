@@ -43,7 +43,7 @@ class EmailAnalysis(Base):
         String(32), nullable=False, default="rules", server_default="rules"
     )
     classifier_version: Mapped[str] = mapped_column(
-        String(64), nullable=False, default="friday-rules-v1", server_default="friday-rules-v1"
+        String(64), nullable=False, default="friday-rules-v2", server_default="friday-rules-v2"
     )
     analysis_status: Mapped[str] = mapped_column(String(16), nullable=False, default="complete", index=True)
     analyzed_at: Mapped[datetime] = mapped_column(

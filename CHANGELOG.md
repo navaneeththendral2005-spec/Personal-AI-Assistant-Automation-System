@@ -60,3 +60,33 @@ Historical test counts in earlier development documents refer to different snaps
 - Added `GET /gmail/intelligence/unanswered` and unanswered-conversation support in assistant chat and daily briefing.
 - No database schema changes or migrations.
 - Added regression tests in `tests/test_phase3_email_enhancements.py`.
+
+
+## 2026-11-10 — Phase 3 real-inbox refinement
+
+- Suppressed automated/no-reply, routine system, promotional, and update messages from unanswered-response tracking.
+- Prevented promotional urgency language from elevating marketing emails to HIGH/URGENT or generating reply requirements.
+- Tightened career search in both inbox ask and assistant chat to source message content, added combined interview/assessment/job queries, and reduced interview-course promotion false positives.
+- Made local inbox summaries shorter and removed URL tracking parameters while preserving destination paths and explicit eligibility/deadline evidence.
+- Filtered routine promotions and updates from high-priority and response-needed daily briefing sections.
+- Bumped production rules classifier provenance to `friday-rules-v2` so existing analyses are refreshed on the next analysis/sync run. No schema migration.
+- Added regression tests for automated notification suppression, promotional priority, career-search relevance, and compact URL-safe summaries.
+
+
+## 2026-11-10 — Phase 3 final relevance and coverage refinement
+
+- Added facet-aware matching for compound career queries: concrete interview invitations, assessment deadlines, and recruiter requests now require their own supporting evidence instead of broad keyword overlap.
+- Prevented interview-preparation/educational copy from receiving automatic HIGH priority solely because it mentions interviews. Explicit interview events and genuine shortlist/offer signals remain eligible for elevated priority.
+- Tightened the daily briefing attention queue so generic opportunity/application notices without a response requirement or detected deadline do not crowd out actionable hiring-stage messages.
+- Made unanswered-thread coverage limitations explicit with a partial-history status and single-message-thread count; detection remains read-only and cannot claim complete Gmail thread coverage.
+- Added focused regression cases for the observed false-match and priority scenarios. No database schema changes or migrations.
+- Verification on this packaged project snapshot: `PYTHONPATH=. pytest -q` — 562 passed. Live Gmail behavior still requires validation in the developer's configured environment.
+
+## 2026-11-10 — Phase 3 reliability refinement
+
+- Tightened `/gmail/intelligence/ask` for compound career-action queries: interview invitations, assessment deadlines, and recruiter response requests now require explicit source-text evidence. Automated job feeds, digest posts, and interview-preparation content are excluded from these specific searches.
+- Assessment deadlines now require an assessment signal and deadline cue in the same sentence, preventing an unrelated date elsewhere in a long job digest from qualifying.
+- Added checkpointed read-only synchronization of previously stored Gmail thread IDs. Successful thread fetches are persisted in `gmail_thread_sync_states` so subsequent runs continue the backfill rather than repeatedly fetching already verified threads.
+- Unanswered-thread responses now report verified and unverified local-thread counts separately. Verification is explicitly not a mailbox-wide completeness guarantee.
+- Competition and hackathon notices (including HackQuest-style messages) are classified separately from employment opportunities while their closing dates remain eligible for deadline extraction and prioritization.
+- Added regression tests for LinkedIn/job-feed false positives, assessment/deadline co-occurrence, historical thread backfill, coverage reporting, and competition classification.

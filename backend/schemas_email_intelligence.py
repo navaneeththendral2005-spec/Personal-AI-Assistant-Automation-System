@@ -38,7 +38,7 @@ class EmailIntelligenceItem(BaseModel):
     priority: str
     priority_score: int
     classifier_method: str = "rules"
-    classifier_version: str = "friday-rules-v1"
+    classifier_version: str = "friday-rules-v2"
     classification_reason: str
     requires_response: bool
     detected_actions: list[str] = []

@@ -45,13 +45,23 @@ def analyze_emails(limit: int = Query(default=100, ge=1, le=500), db: Session = 
 
 
 @router.post("/sync-and-analyze")
-def sync_and_analyze(max_results: int = Query(default=10, ge=1, le=500), db: Session = Depends(get_db)):
-    """Sync recent Gmail metadata, then classify the newest stored messages."""
+def sync_and_analyze(
+    max_results: int = Query(default=10, ge=1, le=500),
+    history_max_threads: int = Query(default=50, ge=1, le=500,
+                                     description="Maximum previously stored Gmail threads to verify in this run."),
+    db: Session = Depends(get_db),
+):
+    """Sync recent messages and checkpoint a bounded historical thread backfill."""
     try:
-        from backend.services.gmail_sync_service import sync_gmail_messages
+        from backend.services.gmail_sync_service import (
+            sync_gmail_messages, sync_stored_thread_histories,
+        )
         sync_result = sync_gmail_messages(db, max_results=max_results)
-        analysis_result = analyze_stored_emails(db, limit=max_results)
-        return {"sync": sync_result, "analysis": analysis_result}
+        history_result = sync_stored_thread_histories(db, max_threads=history_max_threads)
+        # The service is bounded at 500 rows. Include older messages introduced
+        # by thread-history expansion so reply tracking has current analysis data.
+        analysis_result = analyze_stored_emails(db, limit=500)
+        return {"sync": sync_result, "thread_history": history_result, "analysis": analysis_result}
     except ValueError as exc:
         db.rollback(); raise HTTPException(status_code=422, detail=str(exc)) from exc
     except GmailAuthorizationError as exc:

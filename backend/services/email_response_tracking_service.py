@@ -12,9 +12,9 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from backend.models import EmailMessage
+from backend.models import EmailMessage, GmailThreadSyncState
 from backend.models_email_intelligence import EmailAnalysis
-from backend.services.email_classifier import classify_email
+from backend.services.email_classifier import _automated_sender, classify_email
 
 
 def _aware(value: datetime | None) -> datetime | None:
@@ -25,6 +25,25 @@ def _aware(value: datetime | None) -> datetime | None:
 
 def _is_sent(email: EmailMessage) -> bool:
     return any(str(label).upper() == "SENT" for label in (email.labels or []))
+
+
+def _is_non_actionable_inbound(email: EmailMessage, analysis: EmailAnalysis | None) -> bool:
+    """Suppress system, no-reply, spam and marketing messages from reply tracking."""
+    labels = {str(label).upper() for label in (email.labels or [])}
+    if labels.intersection({"SPAM", "TRASH", "DRAFT", "CATEGORY_PROMOTIONS"}):
+        return True
+    if _automated_sender(email.sender or ""):
+        return True
+    category = str(getattr(analysis, "category", "") or "").upper()
+    if category in {"PROMOTIONS", "UPDATES"}:
+        return True
+    subject = str(email.subject or "").lower()
+    automated_subject_terms = (
+        "new sign-in", "new login", "security alert", "security notification",
+        "verification code", "one-time password", "password reset", "account activity",
+        "order shipped", "delivery update", "weekly digest", "newsletter",
+    )
+    return any(term in subject for term in automated_subject_terms)
 
 
 def _thread_key(email: EmailMessage) -> str:
@@ -91,6 +110,9 @@ def list_unanswered_threads(
         if _is_sent(latest_email):
             continue
 
+        if _is_non_actionable_inbound(latest_email, latest_analysis):
+            continue
+
         signals = _analysis_for(latest_email, latest_analysis)
         if not signals["requires_response"]:
             continue
@@ -129,18 +151,40 @@ def list_unanswered_threads(
         reverse=True,
     )
     selected = results[:limit]
+    single_message_thread_count = sum(1 for messages in grouped.values() if len(messages) == 1)
+    states = {state.gmail_thread_id: state for state in db.query(GmailThreadSyncState).all()}
+    known_gmail_thread_ids = {str(messages[0][0].thread_id) for messages in grouped.values()
+                              if messages[0][0].thread_id}
+    verified_thread_ids = {thread_id for thread_id in known_gmail_thread_ids
+                           if thread_id in states and states[thread_id].sync_status == "VERIFIED"}
+    unverified_thread_count = max(0, len(grouped) - len(verified_thread_ids))
+    complete_known_threads = bool(grouped) and unverified_thread_count == 0
+    coverage_status = (
+        "STORED_THREADS_VERIFIED" if complete_known_threads
+        else "NO_LOCAL_THREADS" if not grouped
+        else "PARTIAL_LOCAL_HISTORY"
+    )
     return {
         "count": len(selected),
         "total_unanswered_threads": len(results),
         "limit": limit,
         "min_response_confidence": min_response_confidence,
         "threads": selected,
-        "scope": "locally_stored_messages_only",
-        "complete_thread_guarantee": False,
+        "scope": "locally_stored_gmail_thread_ids_only",
+        "coverage_status": coverage_status,
+        "complete_thread_guarantee": complete_known_threads,
+        "mailbox_wide_guarantee": False,
+        "stored_thread_count": len(grouped),
+        "single_message_thread_count": single_message_thread_count,
+        "verified_stored_thread_count": len(verified_thread_ids),
+        "unverified_stored_thread_count": unverified_thread_count,
         "note": (
-            "A conversation is flagged only when its latest stored message is incoming (not labeled SENT) "
-            "and response analysis indicates a reply is needed. Sync the relevant Gmail history for better "
-            "coverage; a missing outgoing message in the local store can cause a false positive. Verify in Gmail."
+            "Every locally known Gmail thread ID has been fetched successfully. This verifies those stored thread IDs only; "
+            "it does not prove FRIDAY has discovered every thread in the Gmail mailbox."
+            if complete_known_threads else
+            "This is a conservative assessment of locally stored messages. Some locally known Gmail threads have not yet "
+            "been fetched in full; run POST /gmail/intelligence/sync-and-analyze to continue the checkpointed history backfill. "
+            "Verify candidate conversations in Gmail."
         ),
         "write_actions_taken": False,
     }

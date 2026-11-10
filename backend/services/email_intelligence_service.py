@@ -5,6 +5,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from sqlalchemy import func, or_
@@ -12,11 +13,11 @@ from sqlalchemy.orm import Session
 
 from backend.models import EmailMessage, Task
 from backend.models_email_intelligence import EmailAnalysis
-from backend.services.email_classifier import classify_email
+from backend.services.email_classifier import _automated_sender, classify_email
 from backend.services.hybrid_router import classify_hybrid
 
 PRODUCTION_CLASSIFIER_METHOD = "rules"
-PRODUCTION_CLASSIFIER_VERSION = "friday-rules-v1"
+PRODUCTION_CLASSIFIER_VERSION = "friday-rules-v2"
 
 
 def _same_analysis_value(current: Any, incoming: Any) -> bool:
@@ -290,6 +291,15 @@ _DATE_RE = re.compile(
 _URL_RE = re.compile(r"https?://[^\s<>()\]]+", re.I)
 
 
+def _display_url(value: str) -> str:
+    """Keep a useful application URL while dropping tracking query strings."""
+    try:
+        parsed = urlsplit(value.rstrip(".,;!?)"))
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))[:160]
+    except ValueError:
+        return "application link available in original email"
+
+
 def _explicit_deadline(text: str) -> str | None:
     """Return deadline evidence only when date and deadline language occur together."""
     for sentence in _sentences(text):
@@ -418,53 +428,62 @@ def _local_question_answer(question: str, emails: list[EmailMessage]) -> str:
 def _local_summary(
     emails: list[EmailMessage], *, max_emails: int = _SUMMARY_EMAIL_LIMIT, body_chars: int = _SUMMARY_BODY_CHARS
 ) -> str:
-    """Produce a concise inbox digest instead of returning a raw context dump."""
+    """Produce a compact, action-oriented digest rather than a body-text dump."""
     if not emails:
         return "No stored emails were found for the requested summary."
 
     selected = emails[:max_emails]
     with_body = sum(bool((email.body_text or "").strip()) for email in selected)
-    opportunities = []
-    deadlines = []
-    actionable = []
-    other = []
+    opportunities: list[str] = []
+    deadlines: list[str] = []
+    actionable: list[str] = []
+    other: list[str] = []
     for email in selected:
-        summary = _local_email_summary(email, max_chars=300)
+        summary = _local_email_summary(email, max_chars=220)
+        summary = _URL_RE.sub("[link]", summary)
         details = _opportunity_details(email)
-        line = f"- {email.subject or '(no subject)'} — {email.sender or 'unknown sender'}: {summary}"
+        subject = email.subject or "(no subject)"
+        sender = email.sender or "unknown sender"
         if details:
-            opportunities.append(
-                f"- {details['role_or_subject'] or email.subject or 'Opportunity'} — "
-                f"sender: {email.sender or 'unknown sender'}; "
-                f"company (inferred from sender domain): {details['company'] or 'not identified'}; "
-                f"deadline: {details['deadline_evidence'] or 'No explicit deadline found'}; "
-                f"eligibility: {details['eligibility_evidence'] or 'Not identified'}; "
-                f"application link: {details['application_link'] or 'Not identified'}"
-            )
+            parts = [f"- {details['role_or_subject'] or subject}", f"sender: {sender}"]
+            if details["company"]:
+                parts.append(f"company (inferred): {details['company']}")
+            if details["deadline_evidence"]:
+                deadline_text = _URL_RE.sub("[link]", details["deadline_evidence"][:180])
+                parts.append(f"deadline: {deadline_text}")
+            else:
+                parts.append("deadline: No explicit deadline found")
+            if details["eligibility_evidence"]:
+                parts.append(f"eligibility: {details['eligibility_evidence'][:120]}")
+            if details["application_link"]:
+                # Preserve the useful destination while dropping tracking parameters.
+                parts.append(f"application link: {_display_url(details['application_link'])}")
+            opportunities.append("; ".join(parts))
         elif re.search(r"\b(reply|respond|confirm|action required|please complete|payment due|appointment|meeting)\b", summary, re.I):
-            actionable.append(line)
+            actionable.append(f"- {subject} — {summary[:220]}")
         else:
-            other.append(line)
+            other.append(f"- {subject} — {summary[:180]}")
         if details and details["deadline_evidence"]:
-            deadlines.append(f"- {email.subject or 'Opportunity'}: {details['deadline_evidence']}")
+            deadline_evidence = _URL_RE.sub("[link]", details["deadline_evidence"][:180])
+            deadlines.append(f"- {subject}: {deadline_evidence}")
 
     lines = [
-        f"FRIDAY Inbox Summary — {len(selected)} recent emails",
+        f"FRIDAY Inbox Briefing — {len(selected)} recent emails",
         f"Full email bodies available: {with_body}/{len(selected)}.",
         "",
         f"Internship/job opportunities ({len(opportunities)}):",
-        *(opportunities[:8] or ["- No clear job or internship opportunities identified in these emails."]),
+        *(opportunities[:5] or ["- No clear job or internship opportunities identified."]),
         "",
         "Explicit application deadlines:",
-        *(deadlines[:8] or ["- No explicit application deadlines identified in the selected email text."]),
+        *(deadlines[:4] or ["- No explicit application deadlines identified in the selected email text."]),
         "",
-        f"Potentially actionable messages ({len(actionable)}):",
-        *(actionable[:5] or ["- No other clearly actionable messages identified."]),
+        f"Messages that may need action ({len(actionable)}):",
+        *(actionable[:4] or ["- No other clearly actionable messages identified."]),
         "",
         f"Other recent messages ({len(other)}):",
-        *(other[:5] or ["- None."]),
+        *(other[:3] or ["- None."]),
         "",
-        "Notes: Dates are reported as deadlines only when the email text connects them to a deadline/action. Company names inferred from sender domains may be approximate. Attachments were not analyzed.",
+        "Notes: Dates are reported as deadlines only when the email text connects them to an action. Company names inferred from sender domains may be approximate. Attachments were not analyzed.",
     ]
     return "\n".join(lines)
 
@@ -571,32 +590,147 @@ def answer_inbox_question(db: Session, question: str, limit: int = 20) -> dict[s
     if not 1 <= limit <= 50:
         raise ValueError("limit must be between 1 and 50")
 
-    # Match on locally stored content only. Search a few meaningful terms and
-    # include body_text so details omitted from Gmail snippets can be retrieved.
     term = question.strip().lower()
     keywords = [
         word for word in re.findall(r"[a-z0-9@._+-]+", term)
         if len(word) > 2 and word not in _QUESTION_STOPWORDS
     ]
-    query = db.query(EmailMessage)
-    if keywords:
+    asks_career = any(token in term for token in (
+        "interview", "assessment", "job", "career", "internship", "recruiter", "hiring",
+    ))
+    # Compound, action-oriented career searches must not degrade into broad
+    # keyword matching. Each requested facet is checked against source evidence.
+    asks_interview_invitation = (
+        "interview" in term and any(token in term for token in
+        ("invitation", "invitations", "invite", "invites", "actual interview"))
+    )
+    asks_assessment_deadline = (
+        "assessment" in term and any(token in term for token in
+        ("deadline", "deadlines", "due", "complete by", "submit by"))
+    )
+    asks_recruiter_request = (
+        "recruiter" in term and any(token in term for token in
+        ("request", "requests", "reply", "respond", "response", "confirm", "attention"))
+    )
+    strict_career_facets = any((
+        asks_interview_invitation, asks_assessment_deadline, asks_recruiter_request
+    ))
+    query = db.query(EmailMessage, EmailAnalysis).outerjoin(
+        EmailAnalysis, EmailAnalysis.email_id == EmailMessage.id
+    )
+    if keywords and not asks_career:
         clauses = []
         for word in keywords[:8]:
             pattern = f"%{word}%"
             clauses.append(or_(
-                EmailMessage.subject.ilike(pattern),
-                EmailMessage.sender.ilike(pattern),
-                EmailMessage.snippet.ilike(pattern),
-                EmailMessage.body_text.ilike(pattern),
+                EmailMessage.subject.ilike(pattern), EmailMessage.sender.ilike(pattern),
+                EmailMessage.snippet.ilike(pattern), EmailMessage.body_text.ilike(pattern),
             ))
         query = query.filter(or_(*clauses))
     candidates = query.order_by(EmailMessage.message_date.desc(), EmailMessage.id.desc()).limit(500).all()
 
-    def relevance(email: EmailMessage) -> tuple[int, int]:
+    def relevance(email: EmailMessage, analysis: EmailAnalysis | None) -> tuple[int, int]:
         subject = (email.subject or "").lower()
         sender = (email.sender or "").lower()
         snippet = (email.snippet or "").lower()
         body = (email.body_text or "").lower()
+        source_text = " ".join((subject, sender, snippet, body))
+        fallback_classification = classify_email(email) if analysis is None else None
+        category = str(analysis.category if analysis else fallback_classification.get("category", "OTHER")).upper()
+
+        if strict_career_facets:
+            # Educational content and automated feeds are not one-to-one hiring
+            # interactions, even if their copy repeats career-related vocabulary.
+            preparation_content = any(value in source_text for value in (
+                "interview preparation", "interview prep", "interview ready",
+                "practice interviews", "mock interview course", "interview course",
+                "improve your interview skills", "prepare for interviews",
+                "placement interview practice", "english test before your placement",
+            ))
+            digest_content = any(value in source_text for value in (
+                "job alert", "job alerts", "jobs for you", "recommended jobs",
+                "weekly job", "new jobs this week", "explore hundreds of",
+                "notification digest", "shared by your network", "posted:",
+                "i am #hiring", "hiring digest", "jobs matching your profile",
+            ))
+            automated_sender = _automated_sender(sender)
+            if preparation_content or category in {"PROMOTIONS", "UPDATES"}:
+                return 0, 0
+
+            invitation_evidence = any(value in source_text for value in (
+                "interview invitation", "invited to interview", "invite you to interview",
+                "invite you to a technical interview", "interview has been scheduled",
+                "interview is scheduled", "interview scheduled", "schedule your interview",
+                "confirm your interview", "interview slot", "interview details",
+                "shortlisted for interview",
+            ))
+            # A date somewhere else in a long digest is not an assessment deadline.
+            # Require the assessment and deadline cue to occur in the same sentence.
+            assessment_sentences = re.split(r"[.!?\n]+", source_text)
+            assessment_evidence = any(
+                any(value in sentence for value in ("assessment", "coding test", "technical test", "online assessment"))
+                and any(value in sentence for value in (
+                    "deadline", "due", "by ", "before ", "no later than", "closes on", "submit by", "complete by",
+                ))
+                for sentence in assessment_sentences
+            )
+            sender_is_recruiter = any(value in sender for value in (
+                "recruit", "talent", "human.resources", "hr@", "careers@", "people@",
+            ))
+            reply_request = any(value in source_text for value in (
+                "please reply", "please respond", "confirm your availability",
+                "confirm your attendance", "please confirm", "respond by",
+                "reply to this email", "awaiting your response", "kindly respond",
+                "please get back to me", "let me know your availability",
+            ))
+            # A persisted response flag alone is too weak for this query: older
+            # classifiers may have inferred it from boilerplate or a footer.
+            recruiter_request_evidence = sender_is_recruiter and reply_request and not automated_sender and not digest_content
+
+            facets = []
+            score = 0
+            if asks_interview_invitation and invitation_evidence and not digest_content:
+                facets.append("actual interview invitation")
+                score += 30
+            if asks_assessment_deadline and assessment_evidence and not digest_content:
+                facets.append("assessment with deadline evidence")
+                score += 28
+            if asks_recruiter_request and recruiter_request_evidence:
+                facets.append("recruiter request requiring a response")
+                score += 28
+            if not facets:
+                return 0, 0
+            return score, len(facets)
+
+        if asks_career:
+            internship_match = any(value in source_text for value in (
+                "internship opportunity", "internship opening", "internship role",
+                "intern position", "summer intern", "hiring interns", "apply for internship",
+                "internship application", "internshala",
+            ))
+            job_match = any(value in source_text for value in (
+                "job opportunity", "job opening", "job alert", "career opportunity",
+                "recruiter", "we are hiring", "vacancy", "graduate trainee",
+                "shortlisted", "offer letter", "placement drive",
+            ))
+            interview_match = any(value in source_text for value in (
+                "interview invitation", "interview scheduled", "technical interview",
+                "hr interview", "screening call", "confirm your interview",
+                "interview details", "interview slot",
+            ))
+            assessment_match = any(value in source_text for value in (
+                "assessment scheduled", "technical assessment", "coding assessment",
+                "coding test", "technical test", "online assessment",
+            ))
+            career_signal = bool(analysis.career_signal) if analysis else bool(fallback_classification.get("career_signal"))
+            direct_career_signal = internship_match or job_match or interview_match or assessment_match or career_signal
+            # Exclude generic marketing for interview-preparation courses and other
+            # promotions unless the message contains a concrete job/event signal.
+            if category == "PROMOTIONS" and not direct_career_signal:
+                return 0, 0
+            if not direct_career_signal:
+                return 0, 0
+
         score = 0
         matched = 0
         for word in keywords[:12]:
@@ -604,26 +738,35 @@ def answer_inbox_question(db: Session, question: str, limit: int = 20) -> dict[s
             in_snippet, in_body = word in snippet, word in body
             if in_subject or in_sender or in_snippet or in_body:
                 matched += 1
-            score += (5 if in_subject else 0) + (3 if in_sender else 0) + (2 if in_snippet else 0) + (1 if in_body else 0)
+            score += (7 if in_subject else 0) + (2 if in_sender else 0) + (4 if in_snippet else 0) + (2 if in_body else 0)
         if term and len(term) > 4:
-            if term in subject: score += 8
-            elif term in body or term in snippet: score += 4
+            if term in subject:
+                score += 10
+            elif term in body or term in snippet:
+                score += 5
+        if asks_career:
+            # Boost specific career-event evidence over broad keyword coincidence.
+            if any(value in subject for value in ("interview", "assessment", "job", "internship", "recruiter")):
+                score += 8
+            if analysis and analysis.career_signal:
+                score += min(int(analysis.career_confidence or 0) // 30, 3)
         return score, matched
 
-    def message_timestamp(email: EmailMessage) -> float:
-        value = email.message_date
-        if value is None:
-            return float("-inf")
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.timestamp()
+    ranked = [(relevance(email, analysis), email, analysis) for email, analysis in candidates]
+    ranked.sort(key=lambda item: (
+        item[0][0], item[0][1],
+        item[1].message_date.replace(tzinfo=timezone.utc).timestamp()
+        if item[1].message_date and item[1].message_date.tzinfo is None
+        else item[1].message_date.timestamp() if item[1].message_date else float("-inf"),
+        item[1].id,
+    ), reverse=True)
+    selected = [
+        (email, analysis, score)
+        for (score, matched), email, analysis in ranked
+        if (not keywords or matched > 0 or asks_career) and score > 0
+    ][:min(limit, _ANSWER_EMAIL_LIMIT)]
+    emails = [email for email, _analysis, _score in selected]
 
-    ranked = [(relevance(email), email) for email in candidates]
-    ranked.sort(key=lambda item: (item[0][0], item[0][1], message_timestamp(item[1]), item[1].id), reverse=True)
-    emails = [email for (score, matched), email in ranked if not keywords or matched > 0][:min(limit, _ANSWER_EMAIL_LIMIT)]
-
-    # If a keyword search finds no matches, don't silently answer from unrelated
-    # recent mail; report insufficient evidence instead.
     context = _local_summary(emails, max_emails=_ANSWER_EMAIL_LIMIT, body_chars=_ANSWER_BODY_CHARS)
     prompt = (
         f"Answer the user's question using only the email evidence below. "
@@ -631,14 +774,22 @@ def answer_inbox_question(db: Session, question: str, limit: int = 20) -> dict[s
     )
     ai = None
     try:
-        ai = _ai_summary(prompt)
+        ai = None if strict_career_facets else _ai_summary(prompt)
     except (httpx.HTTPError, KeyError, ValueError, TypeError):
         ai = None
 
     if ai:
         answer, provider = ai, "configured_ai"
     else:
-        answer, provider = _local_question_answer(question.strip(), emails), "local_evidence"
+        if strict_career_facets:
+            answer = (
+                f"I found {len(emails)} email(s) with explicit evidence for the requested hiring actions."
+                if emails else
+                "I couldn't find stored emails with explicit evidence of an actual interview invitation, an assessment deadline, or a human recruiter requesting a response. Generic job alerts, automated hiring digests, and interview-preparation content were excluded."
+            )
+            provider = "local_evidence"
+        else:
+            answer, provider = _local_question_answer(question.strip(), emails), "local_evidence"
 
     body_count = sum(bool((email.body_text or "").strip()) for email in emails)
     return {
@@ -649,20 +800,20 @@ def answer_inbox_question(db: Session, question: str, limit: int = 20) -> dict[s
         "evidence": [
             {
                 "email_id": email.id,
-                "relevance_score": relevance(email)[0],
+                "relevance_score": score,
                 "subject": email.subject,
                 "sender": email.sender,
                 "message_date": email.message_date.isoformat() if email.message_date else None,
                 "content_source": "body_text" if (email.body_text or "").strip() else "snippet",
                 "excerpt": _email_body_excerpt(email, 500) or " ".join((email.snippet or "").split())[:500],
             }
-            for email in emails
+            for email, _analysis, score in selected
         ],
         "uses_full_bodies": body_count > 0,
         "emails_with_body": body_count,
         "attachments_accessed": False,
+        "read_only": True,
     }
-
 
 def create_task_from_email(db: Session, email_id: int, title: str | None = None, due_at: datetime | None = None) -> dict[str, Any] | None:
     email = db.query(EmailMessage).filter(EmailMessage.id == email_id).one_or_none()
